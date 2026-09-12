@@ -1,0 +1,88 @@
+@import 'tailwindcss';
+
+@theme {
+  /* Ocean Sunset palette — the single source of colour truth. */
+  --color-ocean-deep: #2f4858;
+  --color-ocean-blue: #33658a;
+  --color-ocean-mist: #86bbb8;
+  --color-sun-gold: #f6ae2d;
+  --color-sunset-orange: #f26419;
+
+  /* Derived surfaces */
+  --color-surface: #f7fafa;
+  --color-card: #ffffff;
+  --color-hairline: rgba(47, 72, 88, 0.14);
+  /* Opaque so contrast is predictable on both the page and card surfaces:
+     5.5:1 on #F7FAFA and 5.8:1 on white, clearing WCAG 2.2 AA at 10px. */
+  --color-muted: #536875;
+  --color-mist-soft: rgba(134, 187, 184, 0.22);
+  --color-gold-soft: #fdf3de;
+  --color-gold-edge: rgba(246, 174, 45, 0.45);
+  --color-gold-ink: #6d4f10;
+  --color-orange-soft: rgba(242, 100, 25, 0.1);
+
+  --radius-card: 16px;
+  --radius-control: 11px;
+
+  --font-sans:
+    var(--font-inter), ui-sans-serif, system-ui, -apple-system, 'Segoe UI',
+    sans-serif;
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  background-color: var(--color-surface);
+  color: var(--color-ocean-deep);
+  font-family: var(--font-sans);
+  /* Mobile-first: never allow a sideways scroll at 320px. */
+  overflow-x: hidden;
+}
+
+/* Tabular numerals keep weights, reps, RPE and volume aligned. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 3px solid var(--color-ocean-blue);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Inputs stay at 16px on mobile so iOS never zooms on focus. */
+input {
+  font-size: 16px;
+}
+
+/* Hide the scrollbar on the day tab strip without disabling scrolling. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+input[type='number'] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
