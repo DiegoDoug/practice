@@ -10,18 +10,20 @@ import { HistoryDialog } from './history-dialog';
 import { SafeModeNotice } from './safe-mode-notice';
 import { WeeklyOverview } from './weekly-overview';
 import { WorkoutDay } from './workout-day';
-import { PROGRAM, getPlannedDay, pickInitialDay } from '@/lib/program';
 import { buildWeekCsv, countCsvDataRows, weekCsvFilename } from '@/lib/csv';
 import { downloadBlob } from '@/lib/storage';
 import { useWorkoutStore } from '@/lib/use-workout-store';
 import { weekKey as currentWeekKey } from '@/lib/week';
 import type { SetEntry, WorkoutState } from '@/lib/types';
+import { getWeek, withCompletion, withSets } from '@/lib/workout';
 import {
-  getWeek,
-  withCompletion,
-  withExerciseName,
-  withSets,
-} from '@/lib/workout';
+  activeDays,
+  findDay,
+  findSlot,
+  pickInitialDay,
+  renameSlot,
+  resolveWeekRoutine,
+} from '@/lib/routine';
 
 const SAVE_LABEL = {
   idle: 'Autosave is on',
@@ -49,13 +51,16 @@ export function WorkoutApp() {
 
   // The URL is the single source of truth for the active day. When no valid
   // day is present we derive today's session and write it back to the URL.
+  const days = useMemo(() => activeDays(state), [state]);
   const requestedDay = params.get('day');
   const urlDay =
-    requestedDay && getPlannedDay(requestedDay) ? requestedDay : null;
-  const activeDay = urlDay ?? pickInitialDay(week.completion);
+    requestedDay && findDay(days, requestedDay) ? requestedDay : null;
+  const activeDay = urlDay ?? pickInitialDay(state, week.completion);
 
   useEffect(() => {
-    if (!hydrated || urlDay) return;
+    // Only write the URL when it does not already name a valid day, so an
+    // archived or unknown ?day= resolves once instead of looping.
+    if (!hydrated || urlDay || !activeDay) return;
     router.replace(`/?day=${activeDay}`, { scroll: false });
   }, [activeDay, hydrated, router, urlDay]);
 
@@ -77,30 +82,54 @@ export function WorkoutApp() {
   );
 
   const onSetsChange = useCallback(
-    (index: number, sets: SetEntry[]) => {
-      update((previous) => withSets(previous, weekKey, activeDay, index, sets));
+    (slotId: string, sets: SetEntry[]) => {
+      if (!activeDay) return;
+      update((previous) => {
+        // The movement recorded is always the slot's current one, never the
+        // movement a prior performance was logged under.
+        const slot = findSlot(findDay(previous.routine, activeDay), slotId);
+        const snapshot = resolveWeekRoutine(
+          previous,
+          weekKey,
+          activeDay,
+        ).exercises.find((entry) => entry.slotId === slotId);
+        const movementId =
+          slot?.movementId ?? snapshot?.movementId ?? 'unknown';
+        const unilateral = slot?.unilateral ?? snapshot?.unilateral;
+        return withSets(
+          previous,
+          weekKey,
+          activeDay,
+          slotId,
+          sets,
+          movementId,
+          unilateral,
+        );
+      });
     },
     [activeDay, update, weekKey],
   );
 
   const onRename = useCallback(
-    (index: number, name: string) => {
-      update((previous) => withExerciseName(previous, activeDay, index, name));
+    (slotId: string, name: string) => {
+      if (!activeDay) return;
+      update((previous) => renameSlot(previous, activeDay, slotId, name));
       setAnnouncement('Exercise name updated for this template.');
     },
     [activeDay, update],
   );
 
   const onToggleComplete = useCallback(() => {
+    if (!activeDay) return;
     const next = !week.completion[activeDay];
     update((previous) => withCompletion(previous, weekKey, activeDay, next));
-    const day = getPlannedDay(activeDay);
+    const day = findDay(state.routine, activeDay);
     setAnnouncement(
       next
         ? `${day?.label} marked complete.`
         : `${day?.label} marked not complete.`,
     );
-  }, [activeDay, update, week.completion, weekKey]);
+  }, [activeDay, state.routine, update, week.completion, weekKey]);
 
   const onExportCsv = useCallback(async () => {
     await flush();
@@ -127,7 +156,7 @@ export function WorkoutApp() {
 
   if (!hydrated) return <AppSkeleton />;
 
-  const day = getPlannedDay(activeDay) ?? PROGRAM[0];
+  const day = activeDay ? findDay(state.routine, activeDay) : undefined;
 
   return (
     <div className="mx-auto w-full max-w-[880px] px-4 pt-5 pb-16">
@@ -169,28 +198,41 @@ export function WorkoutApp() {
       ) : null}
 
       <WeeklyOverview
+        days={days}
         weekKey={weekKey}
         completion={week.completion}
-        activeDay={activeDay}
+        activeDay={activeDay ?? ''}
         onSelect={selectDay}
       />
 
       <DayTabs
-        activeDay={activeDay}
+        days={days}
+        activeDay={activeDay ?? ''}
         completion={week.completion}
         onSelect={selectDay}
       />
 
       <main>
-        <WorkoutDay
-          day={day}
-          state={state}
-          weekKey={weekKey}
-          completed={Boolean(week.completion[activeDay])}
-          onToggleComplete={onToggleComplete}
-          onSetsChange={onSetsChange}
-          onRename={onRename}
-        />
+        {day && activeDay ? (
+          <WorkoutDay
+            day={day}
+            state={state}
+            weekKey={weekKey}
+            completed={Boolean(week.completion[activeDay])}
+            onToggleComplete={onToggleComplete}
+            onSetsChange={onSetsChange}
+            onRename={onRename}
+          />
+        ) : (
+          <section className="rounded-card border-hairline bg-card border p-6 text-center">
+            <h2 className="text-ocean-deep text-[18px] font-bold">
+              No training days yet
+            </h2>
+            <p className="text-muted mt-2 text-[13px]">
+              Your routine is empty. Add a day to start logging again.
+            </p>
+          </section>
+        )}
 
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
           <p

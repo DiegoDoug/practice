@@ -1,10 +1,11 @@
 'use client';
 
 import { Check } from 'lucide-react';
-import { PROGRAM } from '@/lib/program';
+import type { RoutineDay } from '@/lib/types';
 import { formatWeekLabel } from '@/lib/week';
 
 type WeeklyOverviewProps = {
+  days: RoutineDay[];
   weekKey: string;
   completion: Record<string, boolean>;
   activeDay: string;
@@ -12,12 +13,13 @@ type WeeklyOverviewProps = {
 };
 
 export function WeeklyOverview({
+  days,
   weekKey,
   completion,
   activeDay,
   onSelect,
 }: WeeklyOverviewProps) {
-  const done = PROGRAM.filter((day) => completion[day.id]).length;
+  const done = days.filter((day) => completion[day.dayId]).length;
 
   return (
     <section
@@ -31,20 +33,20 @@ export function WeeklyOverview({
         <p className="text-muted text-[12px]">
           <span className="tnum">{formatWeekLabel(weekKey)}</span> ·{' '}
           <span className="tnum">
-            {done}/{PROGRAM.length}
+            {done}/{days.length}
           </span>{' '}
           complete
         </p>
       </div>
-      <ul className="mt-2.5 grid grid-cols-6 gap-1.5">
-        {PROGRAM.map((day) => {
-          const isDone = Boolean(completion[day.id]);
-          const isActive = day.id === activeDay;
+      <ul className="mt-2.5 grid grid-cols-3 gap-1.5 sm:grid-cols-6">
+        {days.map((day) => {
+          const isDone = Boolean(completion[day.dayId]);
+          const isActive = day.dayId === activeDay;
           return (
-            <li key={day.id} className="min-w-0">
+            <li key={day.dayId} className="min-w-0">
               <button
                 type="button"
-                onClick={() => onSelect(day.id)}
+                onClick={() => onSelect(day.dayId)}
                 aria-current={isActive ? 'true' : undefined}
                 className={[
                   'flex min-h-[64px] w-full flex-col items-center justify-center gap-1 rounded-[11px] border px-0.5 py-2 transition-colors duration-150',

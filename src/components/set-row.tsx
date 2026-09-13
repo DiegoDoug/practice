@@ -1,34 +1,49 @@
 'use client';
 
 import { X } from 'lucide-react';
-import type { SetEntry } from '@/lib/types';
+import type { SetEntry, SideEntry } from '@/lib/types';
+
+type Side = 'left' | 'right';
 
 type SetRowProps = {
   exerciseName: string;
   setIndex: number;
   set: SetEntry;
   isLastRow: boolean;
-  onChange: (field: keyof SetEntry, value: string) => void;
+  unilateral: boolean;
+  onChange: (field: keyof SideEntry, value: string, side: Side) => void;
   onRemove: () => void;
   onAdvance: () => void;
+  onSetComplete?: () => void;
   registerWeightInput: (node: HTMLInputElement | null) => void;
 };
 
 const cellClass =
   'tnum h-11 w-full min-w-0 rounded-[10px] border border-hairline bg-card px-1 text-center text-ocean-deep transition-colors duration-150 focus:border-ocean-blue';
 
+const gridClass =
+  'grid w-full grid-cols-[26px_1fr_1fr_1fr_36px] items-center gap-1.5 sm:grid-cols-[32px_1fr_1fr_1fr_40px] sm:gap-2';
+
 export function SetRow({
   exerciseName,
   setIndex,
   set,
   isLastRow,
+  unilateral,
   onChange,
   onRemove,
   onAdvance,
+  onSetComplete,
   registerWeightInput,
 }: SetRowProps) {
-  const label = (field: string) =>
-    `${exerciseName} set ${setIndex + 1} ${field}`;
+  /**
+   * Bilateral labels are byte-identical to the pre-unilateral ones; the side
+   * qualifier is only added when the slot actually tracks two sides.
+   */
+  const label = (field: string, side: Side): string =>
+    unilateral
+      ? `${exerciseName} set ${setIndex + 1} ${side} ${field}`
+      : `${exerciseName} set ${setIndex + 1} ${field}`;
 
   /** Enter walks forward through the row; from the last field of the last row
    *  it appends a new set and focuses its weight field. */
@@ -52,62 +67,107 @@ export function SetRow({
       else onAdvance();
     };
 
-  return (
-    <div className="grid w-full grid-cols-[26px_1fr_1fr_1fr_36px] items-center gap-1.5 sm:grid-cols-[32px_1fr_1fr_1fr_40px] sm:gap-2">
-      <span
-        className="tnum text-muted text-center text-[12px]"
-        aria-hidden="true"
-      >
-        {setIndex + 1}
-      </span>
+  const sideInputs = (side: Side, values: SideEntry, isLastSide: boolean) => (
+    <>
       <input
-        ref={registerWeightInput}
+        ref={side === 'left' ? registerWeightInput : undefined}
         data-set-field="weight"
+        data-side={side}
         className={cellClass}
         type="number"
         inputMode="decimal"
         step="0.5"
         min="0"
-        aria-label={label('weight')}
-        value={set.weight}
-        onChange={(event) => onChange('weight', event.target.value)}
+        aria-label={label('weight', side)}
+        value={values.weight}
+        onChange={(event) => onChange('weight', event.target.value, side)}
+        onBlur={onSetComplete}
         onKeyDown={onKeyDown(false)}
       />
       <input
         data-set-field="reps"
+        data-side={side}
         className={cellClass}
         type="number"
         inputMode="numeric"
         step="1"
         min="0"
-        aria-label={label('reps')}
-        value={set.reps}
-        onChange={(event) => onChange('reps', event.target.value)}
+        aria-label={label('reps', side)}
+        value={values.reps}
+        onChange={(event) => onChange('reps', event.target.value, side)}
+        onBlur={onSetComplete}
         onKeyDown={onKeyDown(false)}
       />
       <input
         data-set-field="rpe"
+        data-side={side}
         className={cellClass}
         type="number"
         inputMode="decimal"
         step="0.5"
         min="1"
         max="10"
-        aria-label={label('RPE')}
-        value={set.rpe}
-        onChange={(event) => onChange('rpe', event.target.value)}
-        onKeyDown={onKeyDown(true)}
+        aria-label={label('RPE', side)}
+        value={values.rpe}
+        onChange={(event) => onChange('rpe', event.target.value, side)}
+        onBlur={onSetComplete}
+        onKeyDown={onKeyDown(isLastSide)}
       />
-      <button
-        type="button"
-        onClick={onRemove}
-        className="border-hairline bg-surface text-muted hover:border-sunset-orange hover:text-sunset-orange grid h-11 w-full place-items-center rounded-[10px] border transition-colors duration-150"
-      >
-        <X className="h-4 w-4" aria-hidden="true" />
-        <span className="sr-only">
-          Remove {exerciseName} set {setIndex + 1}
+    </>
+  );
+
+  const removeButton = (
+    <button
+      type="button"
+      onClick={onRemove}
+      className="border-hairline bg-surface text-muted hover:border-sunset-orange hover:text-sunset-orange grid h-11 w-full place-items-center rounded-[10px] border transition-colors duration-150"
+    >
+      <X className="h-4 w-4" aria-hidden="true" />
+      <span className="sr-only">
+        Remove {exerciseName} set {setIndex + 1}
+      </span>
+    </button>
+  );
+
+  if (!unilateral) {
+    return (
+      <div className={gridClass}>
+        <span
+          className="tnum text-muted text-center text-[12px]"
+          aria-hidden="true"
+        >
+          {setIndex + 1}
         </span>
-      </button>
+        {sideInputs('left', set, true)}
+        {removeButton}
+      </div>
+    );
+  }
+
+  const right = set.right ?? { weight: '', reps: '', rpe: '' };
+
+  return (
+    <div className="border-hairline rounded-[10px] border border-dashed p-1.5">
+      <div className={gridClass}>
+        <span
+          className="tnum text-muted text-center text-[11px] font-semibold"
+          aria-hidden="true"
+        >
+          {setIndex + 1}L
+        </span>
+        {sideInputs('left', set, false)}
+        {removeButton}
+      </div>
+      <div className={`${gridClass} mt-1.5`}>
+        <span
+          className="tnum text-muted text-center text-[11px] font-semibold"
+          aria-hidden="true"
+        >
+          R
+        </span>
+        {sideInputs('right', right, true)}
+        <span />
+      </div>
     </div>
   );
 }

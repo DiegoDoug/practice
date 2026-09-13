@@ -1,0 +1,262 @@
+import { describe, expect, it } from 'vitest';
+import { parseBackup } from '@/lib/backup';
+import { UNKNOWN_MOVEMENT_ID } from '@/lib/movements';
+import { findDay } from '@/lib/routine';
+import type { WorkoutState } from '@/lib/types';
+
+const v3 = (
+  overrides: Partial<{
+    weeks: Record<string, unknown>;
+    exerciseNames: Record<string, string>;
+  }> = {},
+) => ({
+  schemaVersion: 3,
+  programVersion: 1,
+  unit: 'lb',
+  weeks: {},
+  exerciseNames: {},
+  ...overrides,
+});
+
+const migrate = (input: unknown): WorkoutState => {
+  const result = parseBackup(input);
+  if (!result.ok) throw new Error(result.error);
+  return result.state;
+};
+
+describe('v3 → v4 log keys', () => {
+  it('maps a positional key onto a deterministic slot id', () => {
+    const state = migrate(
+      v3({
+        weeks: {
+          '2026-09-07': {
+            days: {
+              day1: {
+                exercises: {
+                  '0': { sets: [{ weight: '135', reps: '8', rpe: '7' }] },
+                  '3': { sets: [{ weight: '25', reps: '15', rpe: '' }] },
+                },
+              },
+            },
+            completion: {},
+          },
+        },
+      }),
+    );
+
+    const exercises = state.weeks['2026-09-07'].days.day1.exercises;
+    expect(Object.keys(exercises).sort()).toEqual(['day1-s0', 'day1-s3']);
+    expect(exercises['day1-s0'].sets[0].weight).toBe('135');
+    expect(exercises['day1-s3'].sets[0].reps).toBe('15');
+  });
+
+  it('is deterministic across repeated migrations', () => {
+    const input = v3({
+      weeks: {
+        '2026-09-07': {
+          days: { day1: { exercises: { '0': { sets: [] } } } },
+          completion: {},
+        },
+      },
+    });
+    expect(migrate(input)).toEqual(migrate(input));
+  });
+
+  it('stamps the movement each slot was pointing at', () => {
+    const state = migrate(
+      v3({
+        weeks: {
+          '2026-09-07': {
+            days: {
+              day2: {
+                exercises: {
+                  '2': { sets: [{ weight: '185', reps: '8', rpe: '' }] },
+                },
+              },
+            },
+            completion: {},
+          },
+        },
+      }),
+    );
+    // Day 2 slot 2 is Barbell Row in the seeded program.
+    expect(
+      state.weeks['2026-09-07'].days.day2.exercises['day2-s2'].movementId,
+    ).toBe('barbell-row');
+  });
+});
+
+describe('v3 → v4 name overrides', () => {
+  it('folds exerciseNames into the routine slot', () => {
+    const state = migrate(v3({ exerciseNames: { 'day1:0': 'Paused Bench' } }));
+    const slot = findDay(state.routine, 'day1')!.exercises[0];
+    expect(slot.nameOverride).toBe('Paused Bench');
+    // Still the seeded movement, so history stays contiguous.
+    expect(slot.movementId).toBe('barbell-bench-press');
+  });
+
+  it('drops an override that merely repeats the movement name', () => {
+    const state = migrate(
+      v3({ exerciseNames: { 'day1:0': 'Barbell Bench Press' } }),
+    );
+    expect(
+      findDay(state.routine, 'day1')!.exercises[0].nameOverride,
+    ).toBeUndefined();
+  });
+
+  it('retires the exerciseNames map', () => {
+    const state = migrate(v3({ exerciseNames: { 'day1:0': 'Paused Bench' } }));
+    expect('exerciseNames' in state).toBe(false);
+  });
+});
+
+describe('v3 → v4 orphaned logs', () => {
+  it('keeps a log whose key is out of range', () => {
+    const state = migrate(
+      v3({
+        weeks: {
+          '2026-09-07': {
+            days: {
+              day1: {
+                exercises: {
+                  '99': { sets: [{ weight: '1', reps: '1', rpe: '' }] },
+                },
+              },
+            },
+            completion: {},
+          },
+        },
+      }),
+    );
+    const exercises = state.weeks['2026-09-07'].days.day1.exercises;
+    expect(exercises['day1-legacy99']).toBeDefined();
+    expect(exercises['day1-legacy99'].movementId).toBe(UNKNOWN_MOVEMENT_ID);
+    expect(exercises['day1-legacy99'].sets[0].weight).toBe('1');
+  });
+
+  it('keeps a log whose key is not a number', () => {
+    const state = migrate(
+      v3({
+        weeks: {
+          '2026-09-07': {
+            days: {
+              day1: {
+                exercises: {
+                  odd: { sets: [{ weight: '2', reps: '2', rpe: '' }] },
+                },
+              },
+            },
+            completion: {},
+          },
+        },
+      }),
+    );
+    expect(
+      state.weeks['2026-09-07'].days.day1.exercises['day1-legacyodd'],
+    ).toBeDefined();
+  });
+
+  it('keeps a day the seeded program does not know, archived', () => {
+    const state = migrate(
+      v3({
+        weeks: {
+          '2026-09-07': {
+            days: {
+              day9: {
+                exercises: {
+                  '0': { sets: [{ weight: '3', reps: '3', rpe: '' }] },
+                },
+              },
+            },
+            completion: {},
+          },
+        },
+      }),
+    );
+    const day = findDay(state.routine, 'day9');
+    expect(day?.archived).toBe(true);
+    expect(
+      state.weeks['2026-09-07'].days.day9.exercises['day9-legacy0'],
+    ).toBeDefined();
+  });
+});
+
+describe('v3 → v4 snapshots', () => {
+  it('backfills a snapshot for every logged day', () => {
+    const state = migrate(
+      v3({
+        weeks: {
+          '2026-09-07': {
+            days: {
+              day1: {
+                exercises: {
+                  '0': { sets: [{ weight: '135', reps: '8', rpe: '' }] },
+                },
+              },
+            },
+            completion: {},
+          },
+        },
+        exerciseNames: { 'day1:0': 'Paused Bench' },
+      }),
+    );
+
+    const snapshot = state.weeks['2026-09-07'].routine?.day1;
+    expect(snapshot?.label).toBe('Day 1');
+    expect(snapshot?.name).toBe('Push');
+    // The name recorded is the one that was in effect, override included.
+    expect(snapshot?.exercises[0].name).toBe('Paused Bench');
+    expect(snapshot?.exercises[0].group).toBe('Push');
+  });
+
+  it('writes no snapshot for a day with no logs', () => {
+    const state = migrate(
+      v3({
+        weeks: {
+          '2026-09-07': {
+            days: { day1: { exercises: {} } },
+            completion: { day1: true },
+          },
+        },
+      }),
+    );
+    expect(state.weeks['2026-09-07'].routine).toBeUndefined();
+  });
+});
+
+describe('v3 → v4 routine seeding', () => {
+  it('preserves the seeded program shape', () => {
+    const state = migrate(v3());
+    expect(state.routine.map((d) => d.exercises.length)).toEqual([
+      6, 6, 6, 6, 7, 6,
+    ]);
+    expect(state.routine.map((d) => d.name)).toEqual([
+      'Push',
+      'Pull',
+      'Legs',
+      'Legs',
+      'Arms',
+      'Chest/Back',
+    ]);
+  });
+
+  it('keeps the per-day muscle-group label where it differs from the movement', () => {
+    // Barbell Row is "Length" on Day 2 and "Back" on Day 6 in the source plan.
+    const state = migrate(v3());
+    const day2 = findDay(state.routine, 'day2')!.exercises[2];
+    const day6 = findDay(state.routine, 'day6')!.exercises[3];
+    expect(day2.movementId).toBe('barbell-row');
+    expect(day6.movementId).toBe('barbell-row');
+    expect(day6.groupOverride).toBe('Back');
+  });
+
+  it('leaves every seeded slot bilateral', () => {
+    // PR 1 is behaviour-preserving: unilateral mode is opt-in, never seeded.
+    const state = migrate(v3());
+    for (const day of state.routine) {
+      for (const slot of day.exercises) {
+        expect(slot.unilateral).toBeUndefined();
+      }
+    }
+  });
+});

@@ -2,22 +2,23 @@
 
 import { Check, Flame } from 'lucide-react';
 import { ExerciseCard } from './exercise-card';
-import { PROGRAM, resolveExerciseName } from '@/lib/program';
-import type { PlannedDay, SetEntry, WorkoutState } from '@/lib/types';
+import type { RoutineDay, SetEntry, WorkoutState } from '@/lib/types';
 import {
   countLoggedExercises,
   findPriorPerformance,
   getSets,
 } from '@/lib/workout';
+import { resolveWeekRoutine } from '@/lib/routine';
 
 type WorkoutDayProps = {
-  day: PlannedDay;
+  day: RoutineDay;
   state: WorkoutState;
   weekKey: string;
   completed: boolean;
   onToggleComplete: () => void;
-  onSetsChange: (index: number, sets: SetEntry[]) => void;
-  onRename: (index: number, name: string) => void;
+  onSetsChange: (slotId: string, sets: SetEntry[]) => void;
+  onRename: (slotId: string, name: string) => void;
+  onSetComplete?: () => void;
 };
 
 export function WorkoutDay({
@@ -28,9 +29,13 @@ export function WorkoutDay({
   onToggleComplete,
   onSetsChange,
   onRename,
+  onSetComplete,
 }: WorkoutDayProps) {
-  const total = day.exercises.length;
-  const logged = countLoggedExercises(state, weekKey, day.id);
+  // Render through the resolved routine so an in-progress week shows the plan
+  // it was logged under rather than one edited midway.
+  const resolved = resolveWeekRoutine(state, weekKey, day.dayId);
+  const total = resolved.exercises.length;
+  const logged = countLoggedExercises(state, weekKey, day.dayId);
   const percent = total === 0 ? 0 : Math.min(100, (logged / total) * 100);
 
   return (
@@ -44,7 +49,9 @@ export function WorkoutDay({
             id="day-heading"
             className="text-ocean-deep text-[18px] leading-tight font-bold"
           >
-            {day.label} — {day.name}
+            {resolved.name
+              ? `${resolved.label} — ${resolved.name}`
+              : resolved.label}
           </h2>
           <p className="tnum text-muted mt-1 text-[13px]">
             {total} exercises · {logged}/{total} logged
@@ -86,35 +93,66 @@ export function WorkoutDay({
         />
       </div>
 
-      <div className="rounded-control border-gold-edge bg-gold-soft mt-4 border p-3">
-        <h3 className="text-gold-ink mb-1.5 flex items-center gap-1.5 text-[11px] font-bold tracking-wide uppercase">
-          <Flame className="h-3.5 w-3.5" aria-hidden="true" />
-          Warmup
-        </h3>
-        <ul className="text-gold-ink list-disc space-y-1 pl-4.5 text-[13px] leading-relaxed">
-          {day.warmup.map((item) => (
-            <li key={item}>{item}</li>
-          ))}
-        </ul>
-      </div>
+      {day.warmup.length > 0 ? (
+        <div className="rounded-control border-gold-edge bg-gold-soft mt-4 border p-3">
+          <h3 className="text-gold-ink mb-1.5 flex items-center gap-1.5 text-[11px] font-bold tracking-wide uppercase">
+            <Flame className="h-3.5 w-3.5" aria-hidden="true" />
+            Warmup
+          </h3>
+          <ul className="text-gold-ink list-disc space-y-1 pl-4.5 text-[13px] leading-relaxed">
+            {day.warmup.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
-      <ul className="mt-1">
-        {day.exercises.map((exercise, index) => (
-          <ExerciseCard
-            key={`${day.id}:${index}`}
-            dayId={day.id}
-            index={index}
-            name={resolveExerciseName(state.exerciseNames, day.id, index)}
-            group={exercise.group}
-            sets={getSets(state, weekKey, day.id, index)}
-            prior={findPriorPerformance(state, weekKey, day.id, index)}
-            onSetsChange={(sets) => onSetsChange(index, sets)}
-            onRename={(name) => onRename(index, name)}
-          />
-        ))}
-      </ul>
+      {total === 0 ? (
+        <p className="text-muted mt-4 text-[13px]">
+          This day has no exercises yet. Add some from the routine editor.
+        </p>
+      ) : (
+        <ul className="mt-1">
+          {resolved.exercises.map((slot, index) => {
+            const prior = findPriorPerformance(
+              state,
+              weekKey,
+              slot.movementId,
+              day.dayId,
+              slot.slotId,
+            );
+            const plannedName =
+              state.movements[slot.movementId]?.name ?? slot.name;
+            return (
+              <ExerciseCard
+                key={slot.slotId}
+                dayId={day.dayId}
+                index={index}
+                slotId={slot.slotId}
+                name={slot.name}
+                group={slot.group}
+                unilateral={Boolean(slot.unilateral)}
+                sets={getSets(
+                  state,
+                  weekKey,
+                  day.dayId,
+                  slot.slotId,
+                  Boolean(slot.unilateral),
+                )}
+                prior={prior}
+                priorNote={
+                  prior && prior.dayId !== day.dayId
+                    ? `as ${plannedName}`
+                    : undefined
+                }
+                onSetsChange={(sets) => onSetsChange(slot.slotId, sets)}
+                onRename={(name) => onRename(slot.slotId, name)}
+                onSetComplete={onSetComplete}
+              />
+            );
+          })}
+        </ul>
+      )}
     </section>
   );
 }
-
-export const PROGRAM_DAY_IDS = PROGRAM.map((day) => day.id);

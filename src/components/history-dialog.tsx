@@ -43,7 +43,9 @@ export function HistoryDialog({ open, onClose, state }: HistoryDialogProps) {
               >
                 <div className="min-w-0">
                   <p className="text-ocean-deep flex items-center gap-1.5 text-[14px] font-semibold">
-                    {entry.dayLabel} — {entry.dayName}
+                    {entry.dayName
+                      ? `${entry.dayLabel} — ${entry.dayName}`
+                      : entry.dayLabel}
                     {entry.completed ? (
                       <>
                         <Check
@@ -59,6 +61,11 @@ export function HistoryDialog({ open, onClose, state }: HistoryDialogProps) {
                         In progress
                       </span>
                     )}
+                    {entry.archived ? (
+                      <span className="text-muted text-[11px] font-medium">
+                        · Removed from plan
+                      </span>
+                    ) : null}
                   </p>
                   <p className="tnum text-muted mt-1 text-[12px]">
                     {entry.sets} logged {entry.sets === 1 ? 'set' : 'sets'} ·{' '}

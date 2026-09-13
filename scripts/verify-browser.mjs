@@ -228,14 +228,23 @@ try {
   const backup = JSON.parse(fs.readFileSync(backupPath, 'utf8'));
   ok(
     'backup has schemaVersion/exportedAt/programVersion',
-    backup.schemaVersion === 3 &&
+    backup.schemaVersion === 4 &&
       !!backup.exportedAt &&
       backup.programVersion === 1,
+    `schemaVersion=${backup.schemaVersion}`,
   );
   ok(
-    'backup contains weeks + names',
-    Object.keys(backup.weeks).length === 1 && 'exerciseNames' in backup,
+    'backup carries the routine and movement library',
+    Array.isArray(backup.routine) &&
+      backup.routine.length > 0 &&
+      !!backup.movements &&
+      Object.keys(backup.movements).length > 0,
   );
+  ok(
+    'backup no longer carries the retired exerciseNames map',
+    !('exerciseNames' in backup),
+  );
+  ok('backup contains the logged week', Object.keys(backup.weeks).length === 1);
 
   // invalid import leaves data intact
   const badPath = file('bad.json');
@@ -276,7 +285,7 @@ try {
   fs.writeFileSync(restorePath, JSON.stringify(restoreDoc));
   await page.setInputFiles('input[type="file"]', restorePath);
   await page.waitForSelector('text=Replace all local data?');
-  ok('legacy v2 import offers confirmation', true);
+  ok('legacy v2 import migrates through the chain and confirms', true);
   await page.getByRole('button', { name: 'Replace my data' }).click();
   await page.waitForTimeout(600);
   const after = await page
