@@ -51,64 +51,53 @@ describe('toCsv', () => {
   });
 });
 
+const snapshot = (name: string) => ({
+  label: 'Day 1',
+  name: 'Push',
+  groups: [],
+  exercises: [
+    {
+      slotId: 'day1-s0',
+      movementId: 'barbell-bench-press',
+      name,
+      group: 'Push',
+      loadMode: 'external' as const,
+      primaryMuscles: [],
+      secondaryMuscles: [],
+    },
+  ],
+});
+
 const stateWithWeek = (): WorkoutState => ({
   ...emptyState(),
-  weeks: {
-    '2026-09-07': {
-      completion: { day1: true },
-      routine: {
-        day1: {
-          label: 'Day 1',
-          name: 'Push',
-          exercises: [
-            {
-              slotId: 'day1-s0',
-              movementId: 'barbell-bench-press',
-              name: 'Bench Press, paused',
-              group: 'Push',
-            },
+  sessions: {
+    current: {
+      sessionId: 'current',
+      routineDayId: 'day1',
+      performedDate: '2026-09-07',
+      status: 'completed',
+      snapshot: snapshot('Bench Press, paused'),
+      exercises: {
+        'day1-s0': {
+          movementId: 'barbell-bench-press',
+          sets: [
+            { weight: '135', reps: '8', rpe: '7' },
+            { weight: '', reps: '', rpe: '' },
+            { weight: '145', reps: '6', rpe: '8.5' },
           ],
-        },
-      },
-      days: {
-        day1: {
-          exercises: {
-            'day1-s0': {
-              movementId: 'barbell-bench-press',
-              sets: [
-                { weight: '135', reps: '8', rpe: '7' },
-                { weight: '', reps: '', rpe: '' },
-                { weight: '145', reps: '6', rpe: '8.5' },
-              ],
-            },
-          },
         },
       },
     },
-    '2026-08-31': {
-      completion: {},
-      routine: {
-        day1: {
-          label: 'Day 1',
-          name: 'Push',
-          exercises: [
-            {
-              slotId: 'day1-s0',
-              movementId: 'barbell-bench-press',
-              name: 'Barbell Bench Press',
-              group: 'Push',
-            },
-          ],
-        },
-      },
-      days: {
-        day1: {
-          exercises: {
-            'day1-s0': {
-              movementId: 'barbell-bench-press',
-              sets: [{ weight: '125', reps: '8', rpe: '' }],
-            },
-          },
+    prior: {
+      sessionId: 'prior',
+      routineDayId: 'day1',
+      performedDate: '2026-08-31',
+      status: 'scheduled',
+      snapshot: snapshot('Barbell Bench Press'),
+      exercises: {
+        'day1-s0': {
+          movementId: 'barbell-bench-press',
+          sets: [{ weight: '125', reps: '8', rpe: '' }],
         },
       },
     },
@@ -120,7 +109,8 @@ describe('buildWeekCsv', () => {
     const csv = buildWeekCsv(emptyState(), '2026-09-07');
     expect(csv.split('\r\n')[0]).toBe(
       'Week,Day,Day Name,Completed,Exercise,Muscle Group,Set,Weight,Reps,RPE,' +
-        'Mode,Left Weight,Left Reps,Left RPE,Right Weight,Right Reps,Right RPE',
+        'Mode,Left Weight,Left Reps,Left RPE,Right Weight,Right Reps,Right RPE,' +
+        'Date,Status',
     );
     expect(countCsvDataRows(csv)).toBe(0);
   });
@@ -145,11 +135,11 @@ describe('buildWeekCsv', () => {
   it('escapes overridden exercise names and keeps the original set numbering', () => {
     const lines = buildWeekCsv(stateWithWeek(), '2026-09-07').split('\r\n');
     expect(lines[1]).toBe(
-      '2026-09-07,Day 1,Push,Yes,"Bench Press, paused",Push,1,135,8,7,bilateral,,,,,,',
+      '2026-09-07,Day 1,Push,Yes,"Bench Press, paused",Push,1,135,8,7,bilateral,,,,,,,2026-09-07,completed',
     );
     // The blank row two is skipped but row three keeps its real index.
     expect(lines[2]).toBe(
-      '2026-09-07,Day 1,Push,Yes,"Bench Press, paused",Push,3,145,6,8.5,bilateral,,,,,,',
+      '2026-09-07,Day 1,Push,Yes,"Bench Press, paused",Push,3,145,6,8.5,bilateral,,,,,,,2026-09-07,completed',
     );
   });
 

@@ -174,12 +174,19 @@ export function downloadBlob(blob: Blob, filename: string): void {
  */
 export const SESSION_KEY = 'weekly-practice-log/session';
 
+/**
+ * A timer stored by a pre-v5 build carried `weekKey` + `dayId` instead of a
+ * session id. It fails this check and is therefore discarded on load, which is
+ * the safe outcome: the hook that hydrates the timer has no access to
+ * WorkoutState, so it cannot resolve which migrated session the timer belonged
+ * to without a hydration race. Nothing logged is lost — sets autosave through
+ * their own path — only the running clock.
+ */
 const isLiveSession = (value: unknown): value is LiveSession => {
   if (typeof value !== 'object' || value === null) return false;
   const s = value as Record<string, unknown>;
   return (
-    typeof s.weekKey === 'string' &&
-    typeof s.dayId === 'string' &&
+    typeof s.sessionId === 'string' &&
     typeof s.startedAt === 'number' &&
     (s.pausedAt === null || typeof s.pausedAt === 'number') &&
     typeof s.pausedMs === 'number' &&

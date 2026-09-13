@@ -16,6 +16,7 @@ import {
 } from '@/lib/types';
 import { sideProgression, withSets } from '@/lib/workout';
 import { emptyState } from '@/lib/backup';
+import { ensureWeekDaySession } from '@/lib/sessions';
 import type { SetEntry, WorkoutState } from '@/lib/types';
 
 const both = (
@@ -158,16 +159,22 @@ describe('sideProgression', () => {
     state: WorkoutState,
     weekKey: string,
     sets: SetEntry[],
-  ): WorkoutState =>
-    withSets(
+  ): WorkoutState => {
+    const { state: next, sessionId } = ensureWeekDaySession(
       state,
       weekKey,
       'day4',
+      weekKey,
+    );
+    return withSets(
+      next,
+      sessionId,
       'day4-s2',
       sets,
       'bulgarian-split-squat',
       true,
     );
+  };
 
   it('returns one row per week, oldest first', () => {
     let state = emptyState();
@@ -181,10 +188,15 @@ describe('sideProgression', () => {
   });
 
   it('ignores bilateral logs of the same movement', () => {
-    const state = withSets(
+    const created = ensureWeekDaySession(
       emptyState(),
       '2026-09-07',
       'day4',
+      '2026-09-07',
+    );
+    const state = withSets(
+      created.state,
+      created.sessionId,
       'day4-s2',
       [{ weight: '50', reps: '10', rpe: '' }],
       'bulgarian-split-squat',

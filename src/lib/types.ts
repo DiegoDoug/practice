@@ -3,7 +3,7 @@
 import type { SessionStatus } from './status';
 
 /** The current persisted schema version. */
-export type SchemaVersion = 4;
+export type SchemaVersion = 5;
 
 /** One side's numbers. Values stay strings at the draft layer so partial
  *  input ("13", "1.") is never destroyed by eager numeric coercion. */
@@ -143,16 +143,35 @@ export type RoutineDay = {
   groups?: ExerciseGroup[];
 };
 
-/** Persisted application state. `weeks` is keyed by local-Monday `YYYY-MM-DD`. */
+/**
+ * Persisted application state.
+ *
+ * `weeks` is gone: logs live in `sessions`, each carrying its own dates, so a
+ * routine day is no longer limited to one occurrence per week. `WorkoutWeek`
+ * survives as a migration-input type only.
+ */
 export type WorkoutState = {
   schemaVersion: SchemaVersion;
   programVersion: number;
+  /** DISPLAY preference. The unit a set was logged in lives on its log. */
   unit: WeightUnit;
-  weeks: Record<string, WorkoutWeek>;
+  /** Every training session, keyed by its opaque `sessionId`. */
+  sessions: Record<string, WorkoutSession>;
   /** The user's editable plan, seeded from `PROGRAM`. */
   routine: RoutineDay[];
   /** Seeded library plus user additions, keyed by movement id. */
   movements: Record<string, Movement>;
+  goals?: Record<string, Goal>;
+  /** Weekly working-set targets per muscle. */
+  targets?: Partial<Record<MuscleId, number>>;
+  /** Durable setup memory, keyed by movement id. */
+  setupNotes?: Record<string, MovementNote>;
+  /**
+   * Week-scoped substitutions from a v4 document whose slot belonged to no
+   * migrated session, keyed `${weekKey}:${slotId}`. Kept rather than dropped:
+   * losing a swap silently would misattribute whatever was logged under it.
+   */
+  unresolvedSubstitutions?: Record<string, string>;
 };
 
 /** The seeded plan shape. `PROGRAM` is now a seed only, not runtime state. */

@@ -13,10 +13,12 @@ export type RestState = {
 };
 
 export type LiveSession = {
-  /** Pinned when the session starts, so finishing after midnight on Sunday
-   *  still writes to the week the workout began in. */
-  weekKey: string;
-  dayId: string;
+  /**
+   * Pinned when the timer starts, so finishing after midnight — or after a
+   * week boundary — still writes to the session the workout began in. A
+   * session id is stable under rescheduling, which a week key was not.
+   */
+  sessionId: string;
   startedAt: number;
   /** Epoch ms the session was paused at, or null while running. */
   pausedAt: number | null;
@@ -32,14 +34,12 @@ export const DEFAULT_REST_SEC = 90;
 export const STALE_AFTER_MS = 12 * 60 * 60 * 1000;
 
 export function startSession(
-  weekKey: string,
-  dayId: string,
+  sessionId: string,
   now: number = Date.now(),
   restDefaultSec: number = DEFAULT_REST_SEC,
 ): LiveSession {
   return {
-    weekKey,
-    dayId,
+    sessionId,
     startedAt: now,
     pausedAt: null,
     pausedMs: 0,

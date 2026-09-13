@@ -73,7 +73,7 @@ export function HistoryDialog({ open, onClose, state }: HistoryDialogProps) {
           <ul className="divide-hairline divide-y">
             {shown.map((entry) => (
               <li
-                key={`${entry.weekKey}:${entry.dayId}`}
+                key={entry.sessionId}
                 className="flex items-start justify-between gap-3 py-3"
               >
                 <div className="min-w-0">
@@ -108,7 +108,11 @@ export function HistoryDialog({ open, onClose, state }: HistoryDialogProps) {
                   </p>
                 </div>
                 <p className="tnum text-muted shrink-0 text-[12px]">
-                  {formatWeekLabel(entry.weekKey)}
+                  {entry.date
+                    ? formatWeekLabel(entry.date)
+                    : entry.weekKey
+                      ? `week of ${formatWeekLabel(entry.weekKey)}`
+                      : 'undated'}
                 </p>
               </li>
             ))}

@@ -1,15 +1,25 @@
 import { z } from 'zod';
 import { PROGRAM_VERSION } from './program';
 import { seededMovements, slugify, UNKNOWN_MOVEMENT_ID } from './movements';
-import { seedRoutine, slotIdFor, snapshotDay } from './routine';
+import {
+  seedRoutine,
+  sessionSnapshotOf,
+  slotIdFor,
+  snapshotDay,
+  upgradeSnapshot,
+} from './routine';
+import { isSetComplete } from './completion';
+import { loadModeFor } from './measure';
+import { legacySessionId } from './sessions';
 import type { RoutineDay, WorkoutState } from './types';
 
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 const sideSchema = z.object({
   weight: z.string().catch(''),
   reps: z.string().catch(''),
   rpe: z.string().catch(''),
+  assist: z.string().optional(),
 });
 
 const setEntrySchema = sideSchema.extend({
@@ -17,9 +27,42 @@ const setEntrySchema = sideSchema.extend({
   // per-side data is now declared, so it survives a load instead of being
   // silently stripped.
   right: sideSchema.optional(),
+  setId: z.string().optional(),
+  done: z.boolean().optional(),
+  doneAt: z.number().optional(),
+  kind: z.enum(['working', 'warmup', 'drop']).optional(),
+  reachedFailure: z.boolean().optional(),
 });
 
 const weekKeyPattern = /^\d{4}-\d{2}-\d{2}$/;
+
+const muscleIdSchema = z.enum([
+  'chest',
+  'front-delts',
+  'side-delts',
+  'rear-delts',
+  'lats',
+  'traps',
+  'upper-back',
+  'lower-back',
+  'biceps',
+  'triceps',
+  'forearms',
+  'quads',
+  'hamstrings',
+  'glutes',
+  'calves',
+  'abs',
+]);
+
+const exerciseGroupSchema = z.object({
+  groupId: z.string(),
+  kind: z.enum(['superset', 'circuit']),
+  slotIds: z.array(z.string()),
+  rounds: z.number().int().positive(),
+  restBetweenExercisesSec: z.number().nonnegative().optional(),
+  restBetweenRoundsSec: z.number().nonnegative().optional(),
+});
 
 // --- v2: the original localStorage workout log -----------------------------
 
@@ -70,6 +113,8 @@ const movementSchema = z.object({
   variations: z.array(z.string()).optional(),
   unilateral: z.boolean().optional(),
   custom: z.boolean().optional(),
+  primaryMuscles: z.array(muscleIdSchema).optional(),
+  secondaryMuscles: z.array(muscleIdSchema).optional(),
 });
 
 const routineExerciseSchema = z.object({
@@ -87,6 +132,7 @@ const routineDaySchema = z.object({
   warmup: z.array(z.string()),
   exercises: z.array(routineExerciseSchema),
   archived: z.boolean().optional(),
+  groups: z.array(exerciseGroupSchema).optional(),
 });
 
 const snapshotSchema = z.object({
@@ -135,13 +181,91 @@ const v4Schema = z.object({
   movements: z.record(z.string(), movementSchema),
 });
 
-export type BackupFile = z.infer<typeof v4Schema>;
+// --- v5: dated, independent sessions ---------------------------------------
+
+const snapshotExerciseSchema = z.object({
+  slotId: z.string(),
+  movementId: z.string(),
+  name: z.string(),
+  group: z.string(),
+  unilateral: z.boolean().optional(),
+  loadMode: z.enum(['external', 'bodyweight']).catch('external'),
+  primaryMuscles: z.array(muscleIdSchema).catch([]),
+  secondaryMuscles: z.array(muscleIdSchema).catch([]),
+});
+
+const sessionSnapshotSchema = z.object({
+  label: z.string(),
+  name: z.string(),
+  exercises: z.array(snapshotExerciseSchema),
+  groups: z.array(exerciseGroupSchema).catch([]),
+});
+
+const exerciseLogSchema = z.object({
+  movementId: z.string().catch(UNKNOWN_MOVEMENT_ID),
+  unilateral: z.boolean().optional(),
+  unit: z.enum(['lb', 'kg']).optional(),
+  sets: z.array(setEntrySchema),
+});
+
+const sessionSchema = z.object({
+  sessionId: z.string(),
+  routineDayId: z.string().nullable(),
+  scheduledDate: z.string().regex(weekKeyPattern).optional(),
+  performedDate: z.string().regex(weekKeyPattern).optional(),
+  legacyWeekKey: z.string().regex(weekKeyPattern).optional(),
+  status: z.enum(['scheduled', 'in_progress', 'completed', 'skipped']),
+  startedAt: z.number().optional(),
+  finishedAt: z.number().optional(),
+  pausedMs: z.number().optional(),
+  snapshot: sessionSnapshotSchema.optional(),
+  exercises: z.record(z.string(), exerciseLogSchema),
+  substitutions: z.record(z.string(), z.string()).optional(),
+  note: z.string().optional(),
+  slotNotes: z.record(z.string(), z.string()).optional(),
+  groupProgress: z.record(z.string(), z.number()).optional(),
+});
+
+const goalSchema = z.object({
+  goalId: z.string(),
+  movementId: z.string(),
+  targetWeight: z.number(),
+  targetReps: z.number(),
+  unit: z.enum(['lb', 'kg']),
+  side: z.enum(['left', 'right']).optional(),
+  createdAt: z.string(),
+  archived: z.boolean().optional(),
+});
+
+const movementNoteSchema = z.object({
+  setup: z.string().catch(''),
+  cues: z.string().catch(''),
+  updatedAt: z.string(),
+});
+
+const v5Schema = z.object({
+  schemaVersion: z.literal(5),
+  exportedAt: z.string().optional(),
+  programVersion: z.number().int().nonnegative().optional(),
+  unit: z.enum(['lb', 'kg']).optional(),
+  sessions: z.record(z.string(), sessionSchema),
+  routine: z.array(routineDaySchema),
+  movements: z.record(z.string(), movementSchema),
+  goals: z.record(z.string(), goalSchema).optional(),
+  targets: z.partialRecord(muscleIdSchema, z.number().nonnegative()).optional(),
+  setupNotes: z.record(z.string(), movementNoteSchema).optional(),
+  unresolvedSubstitutions: z.record(z.string(), z.string()).optional(),
+});
+
+export type BackupFile = z.infer<typeof v5Schema>;
+
+type V4Document = z.infer<typeof v4Schema>;
 
 export const emptyState = (): WorkoutState => ({
   schemaVersion: CURRENT_SCHEMA_VERSION,
   programVersion: PROGRAM_VERSION,
   unit: 'lb',
-  weeks: {},
+  sessions: {},
   routine: seedRoutine(),
   movements: seededMovements(),
 });
@@ -243,6 +367,127 @@ function upgradeV3ToV4(v3: V3Document): unknown {
 }
 
 /**
+ * Turn a v4 document into a v5 one.
+ *
+ * The delicate parts, each of which loses data if done casually:
+ *
+ *  - Session candidates come from the DAY-keyed collections only: `days`,
+ *    `completion` and `routine`. A day marked complete with nothing logged is
+ *    a real session and must survive.
+ *  - `substitutions` is keyed by SLOT id, unlike every collection beside it.
+ *    Treating those keys as days would mint phantom sessions, so each entry is
+ *    resolved to the day that owns its slot — via the week's frozen snapshot
+ *    first, then the template — and anything unownable is preserved under
+ *    `unresolvedSubstitutions` rather than dropped.
+ *  - No date is invented. Routine order does not prove when a workout
+ *    happened, so both dates stay unset and `legacyWeekKey` records the week.
+ *  - Sets are classified with the same completion rule the app now uses, given
+ *    deterministic ids, and left WITHOUT `doneAt`: the time this migration ran
+ *    is not the time the set was performed.
+ */
+function upgradeV4ToV5(v4: V4Document): unknown {
+  const movements = { ...seededMovements(), ...v4.movements };
+  const unit = v4.unit ?? 'lb';
+  const byDayId = new Map(v4.routine.map((day) => [day.dayId, day]));
+  const sessions: Record<string, unknown> = {};
+  const unresolvedSubstitutions: Record<string, string> = {};
+
+  for (const [weekKey, week] of Object.entries(v4.weeks)) {
+    // The union of the day-keyed collections. `substitutions` is deliberately
+    // absent: its keys are slots, not days.
+    const dayIds = new Set([
+      ...Object.keys(week.days),
+      ...Object.keys(week.completion),
+      ...Object.keys(week.routine ?? {}),
+    ]);
+
+    /** Which day owns a slot: the week's snapshot first, then the template. */
+    const ownerOf = (slotId: string): string | null => {
+      for (const [dayId, snapshot] of Object.entries(week.routine ?? {})) {
+        if (snapshot.exercises.some((entry) => entry.slotId === slotId)) {
+          return dayId;
+        }
+      }
+      for (const day of v4.routine) {
+        if (day.exercises.some((entry) => entry.slotId === slotId)) {
+          return day.dayId;
+        }
+      }
+      return null;
+    };
+
+    const substitutionsByDay = new Map<string, Record<string, string>>();
+    for (const [slotId, movementId] of Object.entries(
+      week.substitutions ?? {},
+    )) {
+      const owner = ownerOf(slotId);
+      if (owner === null || !dayIds.has(owner)) {
+        unresolvedSubstitutions[`${weekKey}:${slotId}`] = movementId;
+        continue;
+      }
+      const existing = substitutionsByDay.get(owner) ?? {};
+      existing[slotId] = movementId;
+      substitutionsByDay.set(owner, existing);
+    }
+
+    for (const dayId of dayIds) {
+      const sessionId = legacySessionId(weekKey, dayId);
+      const logs = week.days[dayId]?.exercises ?? {};
+      const snapshot = week.routine?.[dayId];
+      const templateDay = byDayId.get(dayId);
+
+      const exercises: Record<string, unknown> = {};
+      for (const [slotId, log] of Object.entries(logs)) {
+        const movement = movements[log.movementId];
+        const unilateral = Boolean(log.unilateral);
+        const mode = {
+          loadMode: loadModeFor(movement?.equipment ?? 'other'),
+          unilateral,
+        };
+        exercises[slotId] = {
+          ...log,
+          unit,
+          sets: log.sets.map((set, index) => ({
+            ...set,
+            setId: `${sessionId}:${slotId}:${index}`,
+            // Complete when the row carries what its mode requires. No
+            // `doneAt`: that timestamp is genuinely unknown.
+            ...(isSetComplete(set, mode) ? { done: true } : {}),
+          })),
+        };
+      }
+
+      const substitutions = substitutionsByDay.get(dayId);
+      sessions[sessionId] = {
+        sessionId,
+        routineDayId: dayId,
+        legacyWeekKey: weekKey,
+        status: week.completion[dayId] ? 'completed' : 'scheduled',
+        exercises,
+        ...(snapshot
+          ? { snapshot: upgradeSnapshot(movements, snapshot) }
+          : templateDay
+            ? { snapshot: sessionSnapshotOf(movements, templateDay) }
+            : {}),
+        ...(substitutions ? { substitutions } : {}),
+      };
+    }
+  }
+
+  return {
+    schemaVersion: 5,
+    programVersion: v4.programVersion ?? PROGRAM_VERSION,
+    unit,
+    sessions,
+    routine: v4.routine,
+    movements: v4.movements,
+    ...(Object.keys(unresolvedSubstitutions).length > 0
+      ? { unresolvedSubstitutions }
+      : {}),
+  };
+}
+
+/**
  * One-step upgrades keyed by the schema version they upgrade FROM. Each returns
  * a document at version + 1 — never the final state — so the chain composes and
  * a new version cannot accidentally mislabel older data.
@@ -259,18 +504,25 @@ const upgrades: Record<number, (input: unknown) => unknown> = {
     };
   },
   3: (input) => upgradeV3ToV4(v3Schema.parse(input)),
+  4: (input) => upgradeV4ToV5(v4Schema.parse(input)),
 };
 
 const finalize = (input: unknown): WorkoutState => {
-  const parsed = v4Schema.parse(input);
+  const parsed = v5Schema.parse(input);
   const movements = { ...seededMovements(), ...parsed.movements };
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     programVersion: parsed.programVersion ?? PROGRAM_VERSION,
     unit: parsed.unit ?? 'lb',
-    weeks: parsed.weeks,
+    sessions: parsed.sessions,
     routine: parsed.routine.length > 0 ? parsed.routine : seedRoutine(),
     movements,
+    ...(parsed.goals ? { goals: parsed.goals } : {}),
+    ...(parsed.targets ? { targets: parsed.targets } : {}),
+    ...(parsed.setupNotes ? { setupNotes: parsed.setupNotes } : {}),
+    ...(parsed.unresolvedSubstitutions
+      ? { unresolvedSubstitutions: parsed.unresolvedSubstitutions }
+      : {}),
   };
 };
 
@@ -354,9 +606,15 @@ export function buildBackup(
     exportedAt: exportedAt.toISOString(),
     programVersion: state.programVersion,
     unit: state.unit,
-    weeks: state.weeks,
+    sessions: state.sessions,
     routine: state.routine,
     movements: state.movements,
+    ...(state.goals ? { goals: state.goals } : {}),
+    ...(state.targets ? { targets: state.targets } : {}),
+    ...(state.setupNotes ? { setupNotes: state.setupNotes } : {}),
+    ...(state.unresolvedSubstitutions
+      ? { unresolvedSubstitutions: state.unresolvedSubstitutions }
+      : {}),
   };
 }
 
@@ -364,4 +622,4 @@ export const backupFilename = (exportedAt: Date = new Date()): string =>
   `weekly-practice-log-backup-${exportedAt.toISOString().slice(0, 10)}.json`;
 
 /** Exported for the migration tests. */
-export const __testing = { upgradeV3ToV4, slugify, slotIdFor };
+export const __testing = { upgradeV3ToV4, upgradeV4ToV5, slugify, slotIdFor };

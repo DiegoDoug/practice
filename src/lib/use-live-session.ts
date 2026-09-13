@@ -16,7 +16,7 @@ import { clearSession, loadSession, saveSession } from './storage';
 export type LiveSessionStore = {
   session: LiveSession | null;
   hydrated: boolean;
-  start: (weekKey: string, dayId: string) => void;
+  start: (sessionId: string) => void;
   pause: () => void;
   resume: () => void;
   finish: () => void;
@@ -71,7 +71,7 @@ export function useLiveSession(): LiveSessionStore {
   }, []);
 
   const start = useCallback(
-    (weekKey: string, dayId: string) => write(startSession(weekKey, dayId)),
+    (sessionId: string) => write(startSession(sessionId)),
     [write],
   );
 

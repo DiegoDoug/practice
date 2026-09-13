@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { WorkoutState } from '@/lib/types';
 import {
   CURRENT_SCHEMA_VERSION,
   backupFilename,
@@ -35,6 +36,16 @@ const currentV3 = {
   exerciseNames: { 'day1:0': 'Paused Bench' },
 };
 
+/** The migrated session for a legacy (week, day). */
+const sessionOf = (state: WorkoutState, weekKey: string, dayId: string) => {
+  const found = Object.values(state.sessions).find(
+    (session) =>
+      session.legacyWeekKey === weekKey && session.routineDayId === dayId,
+  );
+  if (!found) throw new Error(`no migrated session for ${weekKey}/${dayId}`);
+  return found;
+};
+
 describe('parseBackup — valid input', () => {
   it('migrates a v3 backup and preserves its logged data', () => {
     const result = parseBackup(currentV3);
@@ -43,11 +54,9 @@ describe('parseBackup — valid input', () => {
     expect(result.migratedFrom).toBe(3);
     expect(result.state.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     expect(result.state.unit).toBe('lb');
-    expect(
-      result.state.weeks['2026-09-07'].days.day1.exercises['day1-s0'].sets[0]
-        .weight,
-    ).toBe('135');
-    expect(result.state.weeks['2026-09-07'].completion.day1).toBe(true);
+    const migrated = sessionOf(result.state, '2026-09-07', 'day1');
+    expect(migrated.exercises['day1-s0'].sets[0].weight).toBe('135');
+    expect(migrated.status).toBe('completed');
   });
 
   it('migrates a legacy v2 backup from the original workout log', () => {
@@ -115,7 +124,9 @@ describe('parseBackup — valid input', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const log = result.state.weeks['2026-09-07'].days.day1.exercises['day1-s0'];
+    const log = sessionOf(result.state, '2026-09-07', 'day1').exercises[
+      'day1-s0'
+    ];
     expect(log.unilateral).toBe(true);
     expect(log.sets[0].right).toEqual({ weight: '50', reps: '9', rpe: '8' });
   });
@@ -127,7 +138,7 @@ describe('parseBackup — rejected input', () => {
     [{}, 'missing a schema version'],
     ['just a string', 'missing a schema version'],
     [{ schemaVersion: 99, weeks: {}, movements: {} }, 'not supported'],
-    [{ schemaVersion: 5, weeks: {}, movements: {} }, 'not supported'],
+    [{ schemaVersion: 6, sessions: {}, movements: {} }, 'not supported'],
     [{ version: 1, weeks: {}, exerciseNames: {} }, 'not supported'],
   ])('rejects %j', (input, fragment) => {
     const result = parseBackup(input);

@@ -21,12 +21,14 @@ const T0 = 1_800_000_000_000;
 const sec = (n: number) => n * 1000;
 const min = (n: number) => n * 60_000;
 
-const session = () => startSession('2026-09-07', 'day1', T0);
+const session = () => startSession('s_abc123', T0);
 
 describe('startSession', () => {
-  it('pins the week it began in', () => {
-    // Finishing after a Monday rollover must still write to the starting week.
-    expect(session().weekKey).toBe('2026-09-07');
+  it('pins the session it began on', () => {
+    // Finishing after a midnight or Monday rollover must still write to the
+    // session the workout started in, and a session id survives rescheduling
+    // where a week key would not.
+    expect(session().sessionId).toBe('s_abc123');
   });
 
   it('starts running, unpaused, with no rest', () => {

@@ -13,12 +13,10 @@ type SideComparisonProps = {
 /** Movements that have at least one week of two-sided logging. */
 function unilateralMovements(state: WorkoutState): string[] {
   const ids = new Set<string>();
-  for (const week of Object.values(state.weeks)) {
-    for (const day of Object.values(week.days)) {
-      for (const log of Object.values(day.exercises)) {
-        if (log?.unilateral && (log.sets ?? []).length > 0) {
-          ids.add(log.movementId);
-        }
+  for (const session of Object.values(state.sessions)) {
+    for (const log of Object.values(session.exercises)) {
+      if (log?.unilateral && (log.sets ?? []).length > 0) {
+        ids.add(log.movementId);
       }
     }
   }

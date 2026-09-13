@@ -228,7 +228,7 @@ try {
   const backup = JSON.parse(fs.readFileSync(backupPath, 'utf8'));
   ok(
     'backup has schemaVersion/exportedAt/programVersion',
-    backup.schemaVersion === 4 &&
+    backup.schemaVersion === 5 &&
       !!backup.exportedAt &&
       backup.programVersion === 1,
     `schemaVersion=${backup.schemaVersion}`,
@@ -244,7 +244,10 @@ try {
     'backup no longer carries the retired exerciseNames map',
     !('exerciseNames' in backup),
   );
-  ok('backup contains the logged week', Object.keys(backup.weeks).length === 1);
+  ok(
+    'backup contains the logged session',
+    Object.keys(backup.sessions).length === 1,
+  );
 
   // invalid import leaves data intact
   const badPath = file('bad.json');
@@ -262,8 +265,10 @@ try {
 
   // valid destructive restore requires confirmation
   const restorePath = file('restore.json');
-  const priorWeek = Object.keys(backup.weeks)[0];
-  const d = new Date(priorWeek + 'T12:00:00');
+  // Sessions carry their own dates now; take the one this run just logged.
+  const logged = Object.values(backup.sessions)[0];
+  const loggedDate = logged.performedDate ?? logged.scheduledDate;
+  const d = new Date(loggedDate + 'T12:00:00');
   d.setDate(d.getDate() - 7);
   const priorKey = d.toISOString().slice(0, 10);
   const restoreDoc = {
@@ -725,7 +730,9 @@ try {
   ok(
     'the CSV row carries both sides',
     lungeRows[0]?.includes('unilateral') &&
-      lungeRows[0]?.endsWith('unilateral,50,10,,50,8,'),
+      // Date and Status now trail the side columns, so match the side block
+      // rather than the end of the row.
+      lungeRows[0]?.includes('unilateral,50,10,,50,8,'),
     lungeRows[0],
   );
 

@@ -63,9 +63,9 @@ export function BackupDialog({
     if (!pending) return;
     try {
       await onRestore(pending.state);
-      const weeks = Object.keys(pending.state.weeks).length;
+      const count = Object.keys(pending.state.sessions).length;
       report(
-        `Restored ${weeks} ${weeks === 1 ? 'week' : 'weeks'} from ${pending.filename}.`,
+        `Restored ${count} ${count === 1 ? 'session' : 'sessions'} from ${pending.filename}.`,
       );
       setPending(null);
     } catch {
