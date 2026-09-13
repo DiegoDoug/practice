@@ -326,6 +326,519 @@ try {
       .inputValue()) === '125',
   );
 
+  // ---------- Routine builder ----------
+  // The highest-value assertion in this file: renaming a day must not rewrite
+  // what an already-logged session says it was.
+  await page.getByRole('button', { name: 'Routine', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  ok('routine dialog opens', true);
+
+  // Scope every routine interaction to the dialog: the week cards and day
+  // tabs behind the overlay also match these names.
+  const routine = () => page.locator('[role="dialog"]');
+
+  await routine()
+    .getByRole('button', { name: /^Day 1/ })
+    .first()
+    .click();
+  await page.waitForSelector('text=Workout name');
+  const nameField = routine().getByLabel('Workout name');
+  await nameField.fill('Chest, Shoulders & Triceps');
+  await nameField.blur();
+  await page.waitForTimeout(400);
+
+  await routine().getByRole('button', { name: 'All days' }).click();
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(400);
+
+  ok(
+    'renaming a day updates the current day screen',
+    (await page.textContent('#day-heading')).includes(
+      'Chest, Shoulders & Triceps',
+    ),
+    await page.textContent('#day-heading'),
+  );
+
+  await page.getByRole('button', { name: 'History', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  const historyAfterRename = await page.locator('[role="dialog"]').innerText();
+  // Two halves of the snapshot invariant. The restored earlier week is frozen
+  // and must keep "Push"; the current week's day is still in progress, so by
+  // design it follows the rename.
+  ok(
+    'a past session keeps the name it was logged under',
+    historyAfterRename.includes('Push'),
+    historyAfterRename.split('\n').slice(0, 10).join(' | '),
+  );
+  ok(
+    'an in-progress week follows the rename',
+    historyAfterRename.includes('Chest, Shoulders & Triceps'),
+  );
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+
+  // Reordering must move logged data with the exercise, not with the position.
+  // Write a distinctive value first so the assertion does not depend on what
+  // earlier steps happened to leave behind.
+  await page.getByLabel('Barbell Bench Press set 1 weight').fill('205');
+  await page.getByLabel('Barbell Bench Press set 1 reps').fill('3');
+  await page.waitForTimeout(700);
+  const firstBefore = await page
+    .locator('[data-exercise="day1:0"] input[data-set-field="weight"]')
+    .first()
+    .inputValue();
+  ok(
+    'day 1 slot 0 holds the value just entered',
+    firstBefore === '205',
+    firstBefore,
+  );
+
+  await page.getByRole('button', { name: 'Routine', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  await routine()
+    .getByRole('button', { name: /^Day 1/ })
+    .first()
+    .click();
+  await page.waitForSelector('text=Exercises');
+  await routine()
+    .getByRole('button', { name: /^Move Barbell Bench Press down$/ })
+    .click();
+  await page.waitForTimeout(300);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(400);
+
+  const movedName = await page
+    .locator('[data-exercise="day1:1"] input:not([type="number"])')
+    .first()
+    .inputValue();
+  const movedWeight = await page
+    .locator('[data-exercise="day1:1"] input[data-set-field="weight"]')
+    .first()
+    .inputValue();
+  ok(
+    'reorder moves the exercise',
+    movedName === 'Barbell Bench Press',
+    movedName,
+  );
+  ok(
+    'logged data follows the exercise, not the position',
+    movedWeight === '205',
+    movedWeight,
+  );
+
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForSelector('[data-exercise="day1:1"]');
+  ok(
+    'reorder survives a reload',
+    (await page
+      .locator('[data-exercise="day1:1"] input:not([type="number"])')
+      .first()
+      .inputValue()) === 'Barbell Bench Press',
+  );
+
+  // Removing a slot with history keeps its logs in History and CSV.
+  const historyRowsBefore = (
+    await (async () => {
+      await page.getByRole('button', { name: 'History', exact: true }).click();
+      await page.waitForSelector('[role="dialog"]');
+      const text = await page.locator('[role="dialog"]').innerText();
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(250);
+      return text;
+    })()
+  ).includes('Day 1');
+
+  await page.getByRole('button', { name: 'Routine', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  await routine()
+    .getByRole('button', { name: /^Day 1/ })
+    .first()
+    .click();
+  await page.waitForSelector('text=Exercises');
+  await routine()
+    .getByRole('button', { name: /^Remove Barbell Bench Press from the plan/ })
+    .click();
+  await page.waitForTimeout(300);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(400);
+
+  await page.getByRole('button', { name: 'History', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  const historyAfterRemove = await page.locator('[role="dialog"]').innerText();
+  ok(
+    'a removed exercise keeps its session in history',
+    historyRowsBefore && historyAfterRemove.includes('Day 1'),
+    historyAfterRemove.split('\n').slice(0, 6).join(' | '),
+  );
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+
+  // Adding a day, then confirming the week grid grew.
+  await page.getByRole('button', { name: 'Routine', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  await routine().getByRole('button', { name: 'Add day', exact: true }).click();
+  await page.waitForTimeout(300);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(400);
+  ok(
+    'adding a day grows the week overview beyond six',
+    (await page
+      .locator('section[aria-labelledby="week-heading"] ul > li')
+      .count()) === 7,
+  );
+  ok(
+    'no horizontal overflow at 320px with seven days',
+    (await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    )) <= 0,
+  );
+
+  // ---------- Substitutions ----------
+  // Day 2 slot 2 is Barbell Row, which Day 6 also plans. Swapping one must not
+  // disturb the other's history.
+  await page.getByRole('button', { name: 'Day 2 · Pull' }).click();
+  await page.waitForFunction(() =>
+    document.querySelector('#day-heading')?.textContent?.includes('Day 2'),
+  );
+  await page.getByLabel('Barbell Row set 1 weight').fill('185');
+  await page.getByLabel('Barbell Row set 1 reps').fill('8');
+  await page.waitForTimeout(700);
+
+  await page
+    .locator('[data-exercise="day2:2"]')
+    .getByRole('button', { name: /^Substitute/ })
+    .click();
+  await page.waitForSelector('[role="dialog"]');
+  ok('substitute dialog opens', true);
+
+  // Logged sets belong to the movement being replaced, so this must confirm.
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('button', { name: /^Chest-Supported DB Row/ })
+    .first()
+    .click();
+  await page.waitForSelector("text=Clear this week's sets?");
+  ok('swapping a slot with logged sets asks before clearing them', true);
+
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('button', { name: 'Clear and swap' })
+    .click();
+  await page.waitForTimeout(600);
+
+  const day2Name = await page
+    .locator('[data-exercise="day2:2"] input:not([type="number"])')
+    .first()
+    .inputValue();
+  ok(
+    'the slot now shows the substitute',
+    day2Name === 'Chest-Supported DB Row',
+    day2Name,
+  );
+  ok(
+    'the swap is marked as this-week only',
+    (await page.locator('[data-exercise="day2:2"]').innerText()).includes(
+      'Swapped this week',
+    ),
+  );
+
+  // Day 6 also plans Barbell Row; its own card must be untouched.
+  await page.getByRole('button', { name: 'Day 6 · Chest/Back' }).click();
+  await page.waitForFunction(() =>
+    document.querySelector('#day-heading')?.textContent?.includes('Day 6'),
+  );
+  const day6Name = await page
+    .locator('[data-exercise="day6:3"] input:not([type="number"])')
+    .first()
+    .inputValue();
+  ok(
+    'substituting one slot leaves the same movement elsewhere alone',
+    day6Name === 'Barbell Row',
+    day6Name,
+  );
+
+  // Undo returns the planned exercise.
+  await page.getByRole('button', { name: 'Day 2 · Pull' }).click();
+  await page.waitForFunction(() =>
+    document.querySelector('#day-heading')?.textContent?.includes('Day 2'),
+  );
+  await page
+    .locator('[data-exercise="day2:2"]')
+    .getByRole('button', { name: /^Undo swap/ })
+    .click();
+  await page.waitForTimeout(600);
+  ok(
+    'undoing a swap restores the planned exercise',
+    (await page
+      .locator('[data-exercise="day2:2"] input:not([type="number"])')
+      .first()
+      .inputValue()) === 'Barbell Row',
+  );
+
+  // A custom exercise must not merge into a seeded movement of the same name.
+  await page
+    .locator('[data-exercise="day2:2"]')
+    .getByRole('button', { name: /^Substitute/ })
+    .click();
+  await page.waitForSelector('[role="dialog"]');
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('button', { name: 'Add a custom exercise' })
+    .click();
+  await page.waitForSelector('text=Exercise name');
+  await page
+    .locator('[role="dialog"]')
+    .getByLabel('Exercise name')
+    .fill('Seal Row');
+  await page
+    .locator('[role="dialog"]')
+    .getByLabel('Muscle group')
+    .fill('Length');
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('button', { name: 'Add and use it' })
+    .click();
+  await page.waitForTimeout(700);
+  ok(
+    'a custom exercise can be created and used immediately',
+    (await page
+      .locator('[data-exercise="day2:2"] input:not([type="number"])')
+      .first()
+      .inputValue()) === 'Seal Row',
+  );
+
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForSelector('[data-exercise="day2:2"]');
+  ok(
+    'the custom exercise and its swap survive a reload',
+    (await page
+      .locator('[data-exercise="day2:2"] input:not([type="number"])')
+      .first()
+      .inputValue()) === 'Seal Row',
+  );
+
+  // Back to day 1 so the remaining checks run against a known screen.
+  await page.getByRole('button', { name: /^Day 1 · / }).click();
+  await page.waitForTimeout(400);
+
+  // ---------- Left / right tracking ----------
+  // Turn on per-side tracking for Day 3's Walking Lunges, then log both sides.
+  await page.getByRole('button', { name: 'Day 3 · Legs' }).click();
+  await page.waitForFunction(() =>
+    document.querySelector('#day-heading')?.textContent?.includes('Day 3'),
+  );
+  const day3SetsBefore = await page
+    .locator('[data-exercise="day3:4"] input[data-set-field="weight"]')
+    .count();
+  ok('a bilateral slot has one weight input per set', day3SetsBefore === 1);
+
+  await page.getByRole('button', { name: 'Routine', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  await routine()
+    .getByRole('button', { name: /^Day 3/ })
+    .first()
+    .click();
+  await page.waitForSelector('text=Exercises');
+  await routine().getByRole('checkbox').nth(4).check();
+  await page.waitForTimeout(400);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(500);
+
+  ok(
+    'the card is marked unilateral',
+    (await page.locator('[data-exercise="day3:4"]').innerText()).includes(
+      'Unilateral',
+    ),
+  );
+  ok(
+    'one set row now has two weight inputs',
+    (await page
+      .locator('[data-exercise="day3:4"] input[data-set-field="weight"]')
+      .count()) === 2,
+  );
+
+  await page.getByLabel('Walking Lunges set 1 left weight').fill('50');
+  await page.getByLabel('Walking Lunges set 1 left reps').fill('10');
+  await page.getByLabel('Walking Lunges set 1 right weight').fill('50');
+  await page.getByLabel('Walking Lunges set 1 right reps').fill('8');
+  await page.waitForTimeout(800);
+
+  ok(
+    'a two-sided entry still counts as one logged set',
+    (await page
+      .locator('[data-exercise="day3:4"] input[data-set-field="weight"]')
+      .count()) === 2,
+  );
+
+  await page.getByRole('button', { name: 'History', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  const sessionsText = await page.locator('[role="dialog"]').innerText();
+  // 50x10 + 50x8 = 900, summed across both sides.
+  ok(
+    'history volume sums both sides',
+    sessionsText.includes('900'),
+    sessionsText.split('\n').slice(0, 10).join(' | '),
+  );
+  ok(
+    'a two-sided row is one set in history',
+    /1 logged set\b/.test(sessionsText),
+    sessionsText.split('\n').slice(0, 10).join(' | '),
+  );
+
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('tab', { name: 'Left vs right' })
+    .click();
+  await page.waitForTimeout(300);
+  const sidesText = await page.locator('[role="dialog"]').innerText();
+  ok(
+    'the side comparison lists the movement',
+    sidesText.includes('Walking Lunges'),
+    sidesText.split('\n').slice(0, 8).join(' | '),
+  );
+  ok(
+    'the side comparison reports the imbalance',
+    sidesText.includes('500') &&
+      sidesText.includes('400') &&
+      sidesText.includes('20% left'),
+    sidesText.split('\n').slice(0, 12).join(' | '),
+  );
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+
+  // CSV keeps one row per set and spells out both sides.
+  const [sideCsv] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('button', { name: 'Export CSV' }).click(),
+  ]);
+  const sideCsvText = fs.readFileSync(await sideCsv.path(), 'utf8');
+  const lungeRows = sideCsvText
+    .split('\r\n')
+    .filter((line) => line.includes('Walking Lunges'));
+  ok(
+    'a two-sided set is one CSV row',
+    lungeRows.length === 1,
+    String(lungeRows.length),
+  );
+  ok(
+    'the CSV row carries both sides',
+    lungeRows[0]?.includes('unilateral') &&
+      lungeRows[0]?.endsWith('unilateral,50,10,,50,8,'),
+    lungeRows[0],
+  );
+
+  await page.getByRole('button', { name: /^Day 1 · / }).click();
+  await page.waitForTimeout(400);
+
+  // ---------- Live workout mode ----------
+  await page.getByRole('button', { name: 'Start workout' }).click();
+  await page.waitForSelector('section[aria-label="Workout in progress"]');
+  ok('starting a workout shows the session bar', true);
+
+  const bar = () => page.locator('section[aria-label="Workout in progress"]');
+  const clock = () => bar().locator('[role="timer"]').innerText();
+
+  // The bar must not sit between #day-heading and its sibling paragraph, which
+  // the progress assertion above depends on.
+  ok(
+    'the session bar sits outside the day section',
+    (await page
+      .locator(
+        'section[aria-labelledby="day-heading"] section[aria-label="Workout in progress"]',
+      )
+      .count()) === 0,
+  );
+
+  await page.waitForTimeout(2500);
+  const running = await clock();
+  ok('the elapsed clock advances', running !== '0:00', running);
+
+  await bar().getByRole('button', { name: 'Pause' }).click();
+  await page.waitForTimeout(200);
+  const frozenA = await clock();
+  await page.waitForTimeout(1600);
+  const frozenB = await clock();
+  ok(
+    'pausing freezes the clock',
+    frozenA === frozenB,
+    `${frozenA} then ${frozenB}`,
+  );
+
+  await bar().getByRole('button', { name: 'Resume' }).click();
+  await page.waitForTimeout(1600);
+  ok('resuming advances it again', (await clock()) !== frozenB, await clock());
+
+  // Elapsed is derived from timestamps, so a reload keeps counting.
+  const beforeReload = await clock();
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForSelector('section[aria-label="Workout in progress"]');
+  const afterReload = await clock();
+  const toSeconds = (text) => {
+    const parts = text.split(':').map(Number);
+    return parts.length === 3
+      ? parts[0] * 3600 + parts[1] * 60 + parts[2]
+      : parts[0] * 60 + parts[1];
+  };
+  ok(
+    'the session survives a reload and keeps counting',
+    toSeconds(afterReload) >= toSeconds(beforeReload),
+    `${beforeReload} -> ${afterReload}`,
+  );
+
+  // Rest starts when a set row is completed, not part-way through typing.
+  // Earlier checks reshape day 1, so read whatever exercise is first now
+  // rather than assuming the seeded one is still there.
+  const firstExercise = await page
+    .locator('[data-exercise="day1:0"] input:not([type="number"])')
+    .first()
+    .inputValue();
+  await page.getByLabel(`${firstExercise} set 1 weight`).fill('145');
+  await page.getByLabel(`${firstExercise} set 1 reps`).fill('5');
+  await page.getByLabel(`${firstExercise} set 1 RPE`).click();
+  await page.waitForTimeout(600);
+  ok(
+    'completing a set starts the rest timer',
+    (await bar().innerText()).includes('Rest'),
+    (await bar().innerText()).replace(/\n/g, ' | '),
+  );
+
+  await bar().getByRole('button', { name: '30s' }).click();
+  await page.waitForTimeout(300);
+  await bar().getByRole('button', { name: 'Skip rest' }).click();
+  await page.waitForTimeout(300);
+  ok(
+    'skipping rest dismisses the countdown',
+    !(await bar().innerText()).includes('Rest '),
+  );
+
+  const axeLive = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
+    .analyze();
+  ok(
+    'axe: no serious violations with the live bar showing',
+    axeLive.violations.filter((v) => ['serious', 'critical'].includes(v.impact))
+      .length === 0,
+    axeLive.violations.map((v) => `${v.id}(${v.impact})`).join(', '),
+  );
+
+  await bar().getByRole('button', { name: 'Finish workout' }).click();
+  await page.waitForTimeout(600);
+  ok(
+    'finishing hides the bar',
+    (await page
+      .locator('section[aria-label="Workout in progress"]')
+      .count()) === 0,
+  );
+  ok(
+    'finishing marks the day complete',
+    (await page
+      .locator('section[aria-labelledby="day-heading"]')
+      .getByRole('button', { name: 'Completed' })
+      .count()) === 1,
+  );
+
   // keyboard-only reachability
   await page.keyboard.press('Tab');
   const tabbed = await page.evaluate(
@@ -385,6 +898,8 @@ try {
   );
 } catch (error) {
   ok('verification run completed', false, String(error).split('\n')[0]);
+  // Full stack: the first line alone rarely names the failing locator.
+  console.error('\n--- verification error ---\n', error);
 } finally {
   await browser.close();
   console.log(out.join('\n'));

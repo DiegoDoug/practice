@@ -19,6 +19,8 @@ type WorkoutDayProps = {
   onSetsChange: (slotId: string, sets: SetEntry[]) => void;
   onRename: (slotId: string, name: string) => void;
   onSetComplete?: () => void;
+  onSubstitute: (slotId: string) => void;
+  onUndoSubstitute: (slotId: string) => void;
 };
 
 export function WorkoutDay({
@@ -30,10 +32,13 @@ export function WorkoutDay({
   onSetsChange,
   onRename,
   onSetComplete,
+  onSubstitute,
+  onUndoSubstitute,
 }: WorkoutDayProps) {
   // Render through the resolved routine so an in-progress week shows the plan
   // it was logged under rather than one edited midway.
   const resolved = resolveWeekRoutine(state, weekKey, day.dayId);
+  const substitutions = state.weeks[weekKey]?.substitutions ?? {};
   const total = resolved.exercises.length;
   const logged = countLoggedExercises(state, weekKey, day.dayId);
   const percent = total === 0 ? 0 : Math.min(100, (logged / total) * 100);
@@ -148,6 +153,9 @@ export function WorkoutDay({
                 onSetsChange={(sets) => onSetsChange(slot.slotId, sets)}
                 onRename={(name) => onRename(slot.slotId, name)}
                 onSetComplete={onSetComplete}
+                onSubstitute={() => onSubstitute(slot.slotId)}
+                substituted={Boolean(substitutions[slot.slotId])}
+                onUndoSubstitute={() => onUndoSubstitute(slot.slotId)}
               />
             );
           })}
