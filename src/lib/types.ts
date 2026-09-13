@@ -192,8 +192,21 @@ export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 export const blankSide = (): SideEntry => ({ weight: '', reps: '', rpe: '' });
 
-export const blankSet = (unilateral = false): SetEntry =>
-  unilateral ? { ...blankSide(), right: blankSide() } : blankSide();
+/**
+ * A fresh row, always with its own id. Circuit progress and records key off
+ * `setId`, so a set without one is invisible to them.
+ *
+ * Defined here rather than imported from `sets.ts` to keep this module free of
+ * dependencies; `newSetId` in `sets.ts` is the same generator.
+ */
+const mintSetId = (): string =>
+  `set_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+
+export const blankSet = (unilateral = false): SetEntry => ({
+  ...blankSide(),
+  setId: mintSetId(),
+  ...(unilateral ? { right: blankSide() } : {}),
+});
 
 const sideHasLoad = (side: SideEntry | undefined): boolean =>
   side !== undefined && (side.weight.trim() !== '' || side.reps.trim() !== '');
@@ -227,11 +240,21 @@ export const isCompleteSet = (set: SetEntry, unilateral: boolean): boolean =>
 export const hasAnyValue = (set: SetEntry): boolean =>
   sideHasAny(set) || sideHasAny(set.right);
 
-/** Copy a set without sharing its nested `right` object. */
+/**
+ * Copy a set's numbers into a NEW, unfinished row.
+ *
+ * The copy gets its own id and carries no completion: repeating a set means
+ * "do this again", and a copy that arrived already ticked would count towards
+ * volume and records for work nobody has done yet. `kind` does come along,
+ * since a repeated warmup is still a warmup.
+ */
 export const cloneSet = (set: SetEntry): SetEntry => ({
   weight: set.weight,
   reps: set.reps,
   rpe: set.rpe,
+  setId: mintSetId(),
+  ...(set.assist !== undefined ? { assist: set.assist } : {}),
+  ...(set.kind ? { kind: set.kind } : {}),
   ...(set.right ? { right: { ...set.right } } : {}),
 });
 

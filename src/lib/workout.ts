@@ -10,6 +10,7 @@ import {
   type WorkoutState,
 } from './types';
 import { setVolume, sideTotals } from './volume';
+import { isSetComplete, type CompletionMode } from './completion';
 import { ensureSessionSnapshot, resolveSessionRoutine } from './routine';
 import {
   compareSessions,
@@ -244,19 +245,44 @@ export function removeSet(
   return sets.filter((_, i) => i !== index);
 }
 
+/**
+ * Edit one field of one set.
+ *
+ * Editing NEVER completes a set — that is an explicit act — but it can
+ * un-complete one: a row whose reps have just been cleared is no longer a
+ * finished set, and leaving `done` on it would keep counting work that is no
+ * longer recorded. The completion mode is optional so callers that have no
+ * movement context (tests, CSV tooling) keep the plain behaviour.
+ */
 export function updateSet(
   sets: SetEntry[],
   index: number,
   field: keyof SideEntry,
   value: string,
   side: 'left' | 'right' = 'left',
+  mode?: CompletionMode,
 ): SetEntry[] {
   return sets.map((set, i) => {
     if (i !== index) return set;
-    if (side === 'left') return { ...set, [field]: value };
-    const right = { ...(set.right ?? { weight: '', reps: '', rpe: '' }) };
-    right[field] = value;
-    return { ...set, right };
+
+    let next: SetEntry;
+    if (side === 'left') {
+      next = { ...set, [field]: value };
+    } else {
+      const right = { ...(set.right ?? { weight: '', reps: '', rpe: '' }) };
+      right[field] = value;
+      next = { ...set, right };
+    }
+
+    const check = mode ?? {
+      loadMode: 'external' as const,
+      unilateral: Boolean(next.right),
+    };
+    if (next.done && !isSetComplete(next, check)) {
+      delete next.done;
+      delete next.doneAt;
+    }
+    return next;
   });
 }
 
