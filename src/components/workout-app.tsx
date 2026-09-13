@@ -2,9 +2,17 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Archive, FileDown, History, ListChecks, Play } from 'lucide-react';
+import {
+  Archive,
+  CalendarDays,
+  FileDown,
+  History,
+  ListChecks,
+  Play,
+} from 'lucide-react';
 import { AppSkeleton } from './app-skeleton';
 import { BackupDialog } from './backup-dialog';
+import { CalendarDialog } from './calendar-dialog';
 import { DayTabs } from './day-tabs';
 import { HistoryDialog } from './history-dialog';
 import { RoutineDialog } from './routine-dialog';
@@ -20,7 +28,12 @@ import { WorkoutDay } from './workout-day';
 import { buildWeekCsv, countCsvDataRows, weekCsvFilename } from '@/lib/csv';
 import { downloadBlob } from '@/lib/storage';
 import { useWorkoutStore } from '@/lib/use-workout-store';
-import { toLocalDateKey, weekKey as currentWeekKey } from '@/lib/week';
+import {
+  formatWeekLabel,
+  toLocalDateKey,
+  weekKey as currentWeekKey,
+} from '@/lib/week';
+import { addSessionExercise, resolveDayLink } from '@/lib/calendar';
 import type { SetEntry, WorkoutState } from '@/lib/types';
 import { withCompletion, withSets } from '@/lib/workout';
 import {
@@ -46,6 +59,12 @@ import {
 } from '@/lib/routine';
 import type { Movement } from '@/lib/types';
 
+/**
+ * Sentinel for the movement picker: the exercise is being added to the active
+ * ad-hoc session rather than to a routine day, which has no dayId to name.
+ */
+const BLANK_SESSION = '\u0000blank-session';
+
 const SAVE_LABEL = {
   idle: 'Autosave is on',
   saving: 'Saving…',
@@ -65,6 +84,7 @@ export function WorkoutApp() {
   // not cause a timezone hydration mismatch.
   const [weekKey, setWeekKey] = useState(currentWeekKey);
 
+  const [calendarOpen, setCalendarOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [backupOpen, setBackupOpen] = useState(false);
   const [routineOpen, setRoutineOpen] = useState(false);
@@ -94,30 +114,52 @@ export function WorkoutApp() {
     return map;
   }, [weekSessions]);
 
-  // The URL is the single source of truth for the active day. When no valid
-  // day is present we derive today's session and write it back to the URL.
+  /**
+   * The URL is the source of truth. `?session=` names a session directly;
+   * `?day=` is the legacy form, which is now ambiguous because a routine day
+   * can have several sessions in one week. `resolveDayLink` answers what the
+   * old link should do and NEVER creates anything, so reloading a bookmark ten
+   * times leaves the calendar exactly as it was.
+   */
   const days = useMemo(() => activeDays(state), [state]);
+  const requestedSession = params.get('session');
+  const urlSession = requestedSession
+    ? (state.sessions[requestedSession] ?? null)
+    : null;
   const requestedDay = params.get('day');
   const urlDay =
     requestedDay && findDay(days, requestedDay) ? requestedDay : null;
-  const activeDay = urlDay ?? pickInitialDay(state, completion);
 
-  /**
-   * The session backing the active day, or null when nothing has been logged
-   * yet. Resolving never creates one: creation happens only in the handlers
-   * below, so opening or reloading a link cannot leave duplicates behind.
-   */
-  const activeSession = useMemo(
-    () => (activeDay ? findWeekDaySession(state, weekKey, activeDay) : null),
-    [activeDay, state, weekKey],
+  const dayLink = useMemo(
+    () =>
+      !urlSession && urlDay ? resolveDayLink(state, weekKey, urlDay) : null,
+    [state, urlDay, urlSession, weekKey],
   );
 
+  const activeDay = urlSession
+    ? urlSession.routineDayId
+    : (urlDay ?? pickInitialDay(state, completion));
+
+  /**
+   * The session being logged into, or null when nothing has been logged for
+   * this day yet. Resolving never creates one — creation happens only in the
+   * handlers below and in the calendar.
+   */
+  const activeSession =
+    urlSession ??
+    (dayLink?.kind === 'session'
+      ? (state.sessions[dayLink.sessionId] ?? null)
+      : activeDay
+        ? findWeekDaySession(state, weekKey, activeDay)
+        : null);
+
   useEffect(() => {
-    // Only write the URL when it does not already name a valid day, so an
-    // archived or unknown ?day= resolves once instead of looping.
-    if (!hydrated || urlDay || !activeDay) return;
+    // Only write the URL when it names neither a valid session nor a valid
+    // day, so an archived or unknown parameter resolves once instead of
+    // looping.
+    if (!hydrated || urlSession || urlDay || !activeDay) return;
     router.replace(`/?day=${activeDay}`, { scroll: false });
-  }, [activeDay, hydrated, router, urlDay]);
+  }, [activeDay, hydrated, router, urlDay, urlSession]);
 
   // Recompute the week if the tab is left open across a Monday boundary.
   useEffect(() => {
@@ -136,19 +178,43 @@ export function WorkoutApp() {
     [flush, router],
   );
 
+  const selectSession = useCallback(
+    (sessionId: string) => {
+      void flush();
+      router.replace(`/?session=${sessionId}`, { scroll: false });
+    },
+    [flush, router],
+  );
+
+  /**
+   * Resolve the session to write into, creating one only when the athlete is
+   * logging against a routine day that has none yet. An ad-hoc session is
+   * always already there — the calendar created it explicitly.
+   */
+  const writeTarget = useCallback(
+    (
+      previous: WorkoutState,
+      today: string,
+    ): { state: WorkoutState; sessionId: string } | null => {
+      if (activeSession) {
+        return { state: previous, sessionId: activeSession.sessionId };
+      }
+      if (!activeDay) return null;
+      return ensureWeekDaySession(previous, weekKey, activeDay, today);
+    },
+    [activeDay, activeSession, weekKey],
+  );
+
   const onSetsChange = useCallback(
     (slotId: string, sets: SetEntry[]) => {
-      if (!activeDay) return;
+      if (!activeSession && !activeDay) return;
       update((previous) => {
-        // Logging is the explicit act that creates a session, so this is one of
-        // the few places allowed to mint one.
+        // Logging is the explicit act that creates a session for a routine day,
+        // so this is one of the few places allowed to mint one.
         const today = toLocalDateKey(new Date());
-        const { state: withSession, sessionId } = ensureWeekDaySession(
-          previous,
-          weekKey,
-          activeDay,
-          today,
-        );
+        const target = writeTarget(previous, today);
+        if (!target) return previous;
+        const { state: withSession, sessionId } = target;
         // The movement recorded is what THIS SESSION plans — which includes a
         // one-off swap — never the movement a prior performance was logged
         // under.
@@ -167,7 +233,7 @@ export function WorkoutApp() {
         );
       });
     },
-    [activeDay, update, weekKey],
+    [activeDay, activeSession, update, writeTarget],
   );
 
   const onRename = useCallback(
@@ -180,24 +246,29 @@ export function WorkoutApp() {
   );
 
   const onToggleComplete = useCallback(() => {
-    if (!activeDay) return;
-    const next = !completion[activeDay];
+    if (!activeSession && !activeDay) return;
+    const next = activeSession
+      ? activeSession.status !== 'completed'
+      : !completion[activeDay as string];
     update((previous) => {
-      const { state: withSession, sessionId } = ensureWeekDaySession(
-        previous,
-        weekKey,
-        activeDay,
-        toLocalDateKey(new Date()),
-      );
-      return withCompletion(withSession, sessionId, next, Date.now());
+      const target = writeTarget(previous, toLocalDateKey(new Date()));
+      if (!target) return previous;
+      return withCompletion(target.state, target.sessionId, next, Date.now());
     });
-    const day = findDay(state.routine, activeDay);
+    const label = activeDay
+      ? findDay(state.routine, activeDay)?.label
+      : 'Workout';
     setAnnouncement(
-      next
-        ? `${day?.label} marked complete.`
-        : `${day?.label} marked not complete.`,
+      next ? `${label} marked complete.` : `${label} marked not complete.`,
     );
-  }, [activeDay, completion, state.routine, update, weekKey]);
+  }, [
+    activeDay,
+    activeSession,
+    completion,
+    state.routine,
+    update,
+    writeTarget,
+  ]);
 
   const onExportCsv = useCallback(async () => {
     await flush();
@@ -241,12 +312,34 @@ export function WorkoutApp() {
       if (!dayId) return;
       setAddingToDay(null);
       const name = state.movements[movementId]?.name ?? 'Exercise';
+
+      // A blank workout has no routine day, so the exercise goes onto the
+      // session's own snapshot rather than into the template.
+      if (dayId === BLANK_SESSION) {
+        const sessionId = activeSession?.sessionId;
+        if (!sessionId) return;
+        update((previous) =>
+          addSessionExercise(previous, sessionId, movementId),
+        );
+        setAnnouncement(`${name} added to this workout.`);
+        return;
+      }
+
       onRoutineEdit(
         (previous) => addExercise(previous, dayId, movementId),
         `${name} added.`,
       );
     },
-    [addingToDay, onRoutineEdit, state.movements],
+    [activeSession, addingToDay, onRoutineEdit, state.movements, update],
+  );
+
+  /** Calendar edits are plain state changes; no snapshot refresh is involved. */
+  const onCalendarEdit = useCallback(
+    (edit: (previous: WorkoutState) => WorkoutState, message: string) => {
+      update(edit);
+      setAnnouncement(message);
+    },
+    [update],
   );
 
   /**
@@ -260,7 +353,7 @@ export function WorkoutApp() {
   }, [live]);
 
   const onStartWorkout = useCallback(() => {
-    if (!activeDay) return;
+    if (!activeSession && !activeDay) return;
     const today = toLocalDateKey(new Date());
     const now = Date.now();
     // Decide the id up front rather than reading it out of the state updater,
@@ -268,8 +361,10 @@ export function WorkoutApp() {
     const sessionId = activeSession?.sessionId ?? newSessionId();
     update((previous) =>
       startedSession(
-        ensureWeekDaySession(previous, weekKey, activeDay, today, sessionId)
-          .state,
+        activeSession || !activeDay
+          ? previous
+          : ensureWeekDaySession(previous, weekKey, activeDay, today, sessionId)
+              .state,
         sessionId,
         today,
         now,
@@ -320,12 +415,15 @@ export function WorkoutApp() {
       if (!target) return;
       const name = state.movements[movementId]?.name ?? 'the new exercise';
       update((previous) => {
-        const { state: withSession, sessionId } = ensureWeekDaySession(
-          previous,
-          weekKey,
-          target.dayId,
-          toLocalDateKey(new Date()),
-        );
+        const resolved = activeSession
+          ? { state: previous, sessionId: activeSession.sessionId }
+          : ensureWeekDaySession(
+              previous,
+              weekKey,
+              target.dayId,
+              toLocalDateKey(new Date()),
+            );
+        const { state: withSession, sessionId } = resolved;
         return permanent
           ? substitutePermanently(
               withSession,
@@ -346,7 +444,7 @@ export function WorkoutApp() {
           : `${target.name} replaced with ${name} for this week.`,
       );
     },
-    [state.movements, substituting, update, weekKey],
+    [activeSession, state.movements, substituting, update, weekKey],
   );
 
   const onUndoSubstitute = useCallback(
@@ -394,7 +492,15 @@ export function WorkoutApp() {
             Fast logging · saves in this browser · portable backup
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setCalendarOpen(true)}
+            className="rounded-control border-hairline bg-card text-ocean-deep hover:bg-mist-soft inline-flex min-h-11 items-center gap-1.5 border px-3 text-[13px] font-semibold transition-colors duration-150"
+          >
+            <CalendarDays className="h-4 w-4" aria-hidden="true" />
+            Calendar
+          </button>
           <button
             type="button"
             onClick={() => setHistoryOpen(true)}
@@ -462,7 +568,56 @@ export function WorkoutApp() {
           />
         ) : null}
 
-        {day && activeDay ? (
+        {dayLink?.kind === 'choose' ? (
+          <section className="rounded-card border-hairline bg-card border p-4">
+            <h2 className="text-ocean-deep text-[18px] font-bold">
+              Which session?
+            </h2>
+            <p className="text-muted mt-1 text-[13px]">
+              You trained this day more than once in the week of{' '}
+              {formatWeekLabel(weekKey)}. Pick the one you meant.
+            </p>
+            <ul className="mt-3 space-y-2">
+              {dayLink.sessionIds.map((sessionId) => {
+                const option = state.sessions[sessionId];
+                const resolved = resolveSessionRoutine(state, option);
+                const date = option?.performedDate ?? option?.scheduledDate;
+                return (
+                  <li key={sessionId}>
+                    <button
+                      type="button"
+                      onClick={() => selectSession(sessionId)}
+                      className="rounded-control border-hairline bg-surface hover:bg-mist-soft flex min-h-11 w-full items-center justify-between gap-3 border px-3 text-left text-[13px] font-semibold transition-colors duration-150"
+                    >
+                      <span className="text-ocean-deep">
+                        {resolved.name
+                          ? `${resolved.label} — ${resolved.name}`
+                          : resolved.label}
+                      </span>
+                      <span className="tnum text-muted text-[12px]">
+                        {date ? formatWeekLabel(date) : 'undated'}
+                        {option?.status === 'completed' ? ' · completed' : ''}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ) : activeSession && !activeSession.routineDayId ? (
+          <WorkoutDay
+            state={state}
+            session={activeSession}
+            completed={activeSession.status === 'completed'}
+            onToggleComplete={onToggleComplete}
+            onSetsChange={onSetsChange}
+            onRename={onRename}
+            onSubstitute={onOpenSubstitute}
+            onUndoSubstitute={onUndoSubstitute}
+            onSetComplete={onSetComplete}
+            onAddExercise={() => setAddingToDay(BLANK_SESSION)}
+          />
+        ) : day && activeDay ? (
           <WorkoutDay
             day={day}
             state={state}
@@ -560,6 +715,14 @@ export function WorkoutApp() {
         target={substituting}
         onSubstitute={onSubstitute}
         onCreateMovement={onCreateMovement}
+      />
+      <CalendarDialog
+        open={calendarOpen}
+        onClose={() => setCalendarOpen(false)}
+        state={state}
+        today={toLocalDateKey(new Date())}
+        onEdit={onCalendarEdit}
+        onOpenSession={selectSession}
       />
       <BackupDialog
         open={backupOpen}

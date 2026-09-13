@@ -24,7 +24,8 @@ const blankSession: WorkoutSession = {
 };
 
 type WorkoutDayProps = {
-  day: RoutineDay;
+  /** Absent for an ad-hoc workout, which has no routine day behind it. */
+  day?: RoutineDay;
   state: WorkoutState;
   /** Null until the athlete logs something, which is what creates a session. */
   session: WorkoutSession | null;
@@ -35,6 +36,8 @@ type WorkoutDayProps = {
   onSetComplete?: () => void;
   onSubstitute: (slotId: string) => void;
   onUndoSubstitute: (slotId: string) => void;
+  /** Only offered for an ad-hoc workout; a routine day is edited in Routine. */
+  onAddExercise?: () => void;
 };
 
 export function WorkoutDay({
@@ -48,13 +51,14 @@ export function WorkoutDay({
   onSetComplete,
   onSubstitute,
   onUndoSubstitute,
+  onAddExercise,
 }: WorkoutDayProps) {
   // Render through the resolved routine so an in-progress session shows the
   // plan it was logged under rather than one edited midway. With no session
   // yet, that resolves to the current routine day.
   const resolved = resolveSessionRoutine(
     state,
-    session ?? { ...blankSession, routineDayId: day.dayId },
+    session ?? { ...blankSession, routineDayId: day?.dayId ?? null },
   );
   const sessionId = session?.sessionId ?? '';
   const substitutions = session?.substitutions ?? {};
@@ -117,7 +121,7 @@ export function WorkoutDay({
         />
       </div>
 
-      {day.warmup.length > 0 ? (
+      {day && day.warmup.length > 0 ? (
         <div className="rounded-control border-gold-edge bg-gold-soft mt-4 border p-3">
           <h3 className="text-gold-ink mb-1.5 flex items-center gap-1.5 text-[11px] font-bold tracking-wide uppercase">
             <Flame className="h-3.5 w-3.5" aria-hidden="true" />
@@ -133,7 +137,9 @@ export function WorkoutDay({
 
       {total === 0 ? (
         <p className="text-muted mt-4 text-[13px]">
-          This day has no exercises yet. Add some from the routine editor.
+          {onAddExercise
+            ? 'This workout is empty. Add an exercise to start logging.'
+            : 'This day has no exercises yet. Add some from the routine editor.'}
         </p>
       ) : (
         <ul className="mt-1">
@@ -144,7 +150,7 @@ export function WorkoutDay({
               // today, so everything already logged counts as prior.
               session ? { sessionId } : {},
               slot.movementId,
-              day.dayId,
+              day?.dayId,
               slot.slotId,
             );
             const plannedName =
@@ -152,7 +158,7 @@ export function WorkoutDay({
             return (
               <ExerciseCard
                 key={slot.slotId}
-                dayId={day.dayId}
+                dayId={day?.dayId ?? ''}
                 index={index}
                 slotId={slot.slotId}
                 name={slot.name}
@@ -166,7 +172,7 @@ export function WorkoutDay({
                 )}
                 prior={prior}
                 priorNote={
-                  prior && prior.dayId !== day.dayId
+                  prior && day && prior.dayId !== day.dayId
                     ? `as ${plannedName}`
                     : undefined
                 }
@@ -181,6 +187,16 @@ export function WorkoutDay({
           })}
         </ul>
       )}
+
+      {onAddExercise ? (
+        <button
+          type="button"
+          onClick={onAddExercise}
+          className="rounded-control border-hairline bg-surface text-ocean-blue hover:bg-mist-soft mt-3 min-h-11 w-full border px-3 text-[13px] font-semibold transition-colors duration-150"
+        >
+          Add an exercise
+        </button>
+      ) : null}
     </section>
   );
 }

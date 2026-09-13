@@ -846,6 +846,216 @@ try {
       .count()) === 1,
   );
 
+  // ---------- Calendar and session navigation ----------
+  const sessionCount = () =>
+    page.evaluate(
+      async () =>
+        await new Promise((res) => {
+          const open = indexedDB.open('keyval-store', 1);
+          open.onupgradeneeded = () => open.result.createObjectStore('keyval');
+          open.onsuccess = () => {
+            const r = open.result
+              .transaction('keyval', 'readonly')
+              .objectStore('keyval')
+              .get('weekly-practice-log/state');
+            r.onsuccess = () =>
+              res(Object.keys(r.result?.sessions ?? {}).length);
+            r.onerror = () => res(-1);
+          };
+          open.onerror = () => res(-1);
+        }),
+    );
+
+  const sessionsBefore = await sessionCount();
+
+  // Reloading a legacy ?day= link must never mint a session.
+  await page.goto(`${BASE}/?day=day5`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(400);
+  await page.goto(`${BASE}/?day=day5`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(400);
+  ok(
+    'opening a legacy ?day= link creates no sessions',
+    (await sessionCount()) === sessionsBefore,
+    `${sessionsBefore} -> ${await sessionCount()}`,
+  );
+
+  await page.getByRole('button', { name: 'Calendar' }).click();
+  await page.waitForSelector('[role="dialog"]');
+  ok(
+    'calendar opens on a month grid',
+    (await page.locator('[role="grid"][aria-label="Month"]').count()) === 1,
+  );
+  ok(
+    'the grid covers whole weeks',
+    (await page.locator('[role="gridcell"]').count()) % 7 === 0,
+    String(await page.locator('[role="gridcell"]').count()),
+  );
+
+  const calTodayCell = page.locator('[role="gridcell"][aria-current="date"]');
+  ok('today is marked in the grid', (await calTodayCell.count()) === 1);
+
+  // Schedule an extra session of a day that already has one this week.
+  await calTodayCell.click();
+  await page.getByRole('button', { name: 'Add workout' }).click();
+  await page.waitForTimeout(200);
+  const calDayButtons = page
+    .locator('[role="dialog"]')
+    .getByRole('button', { name: /^Day 1 · / });
+  await calDayButtons.first().click();
+  await page.waitForTimeout(500);
+  ok(
+    'scheduling an extra workout adds one session',
+    (await sessionCount()) === sessionsBefore + 1,
+    `${sessionsBefore} -> ${await sessionCount()}`,
+  );
+  const calDayPanel = await page.textContent('[role="dialog"]');
+  ok(
+    'the same routine day can be repeated on one date',
+    (calDayPanel.match(/Day 1/g) || []).length >= 2,
+    String((calDayPanel.match(/Day 1/g) || []).length),
+  );
+
+  // Moving the plan and correcting history are separate controls.
+  const planInput = page.locator('[role="dialog"] input[type="date"]').first();
+  const trainedInput = page
+    .locator('[role="dialog"] input[type="date"]')
+    .nth(1);
+  const calPlanned = await planInput.inputValue();
+  await trainedInput.fill('2026-09-11');
+  await page.waitForTimeout(400);
+  ok(
+    'correcting the trained date leaves the plan alone',
+    (await planInput.inputValue()) === calPlanned,
+    `plan ${calPlanned} -> ${await planInput.inputValue()}`,
+  );
+
+  // A blank workout, then an exercise added to it.
+  await page.getByRole('button', { name: 'Add workout' }).click();
+  await page.waitForTimeout(200);
+  await page.getByRole('button', { name: 'Blank workout' }).click();
+  await page.waitForTimeout(500);
+  ok(
+    'a blank workout can be added',
+    (await sessionCount()) === sessionsBefore + 2,
+    String(await sessionCount()),
+  );
+
+  const blankOpen = page
+    .locator('[role="dialog"] li', { hasText: 'Extra workout' })
+    .getByRole('button', { name: 'Open' });
+  await blankOpen.first().click();
+  await page.waitForTimeout(600);
+  ok(
+    'opening a session navigates by session id',
+    page.url().includes('?session='),
+    page.url(),
+  );
+  ok(
+    'a blank workout offers to add an exercise',
+    (await page.getByRole('button', { name: 'Add an exercise' }).count()) === 1,
+  );
+  await page.getByRole('button', { name: 'Add an exercise' }).click();
+  await page.waitForSelector('[role="dialog"]');
+  await page
+    .getByRole('button', { name: /Barbell Bench Press/ })
+    .first()
+    .click();
+  await page.waitForTimeout(500);
+  ok(
+    'the exercise lands in the blank workout',
+    (await page.textContent('section[aria-labelledby="day-heading"]')).includes(
+      'Barbell Bench Press',
+    ),
+  );
+
+  // Logging into an ad-hoc session writes to that session, not a routine day.
+  const blankWeight = page
+    .locator(
+      'section[aria-labelledby="day-heading"] input[inputmode="decimal"]',
+    )
+    .first();
+  await blankWeight.fill('60');
+  await blankWeight.blur();
+  await page.waitForTimeout(700);
+  ok(
+    'an ad-hoc session keeps its own logged value',
+    (await blankWeight.inputValue()) === '60',
+  );
+  ok(
+    'logging in an ad-hoc session creates no extra session',
+    (await sessionCount()) === sessionsBefore + 2,
+    String(await sessionCount()),
+  );
+
+  // Two sessions for one routine day make the legacy link ambiguous.
+  await page.goto(`${BASE}/?day=day1`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(500);
+  const ambiguous = await page.textContent('main');
+  ok(
+    'an ambiguous ?day= link asks which session',
+    ambiguous.includes('Which session?'),
+    ambiguous.slice(0, 80),
+  );
+  ok(
+    'the ambiguous link still creates nothing',
+    (await sessionCount()) === sessionsBefore + 2,
+    String(await sessionCount()),
+  );
+  await page
+    .locator('main')
+    .getByRole('button', { name: /Day 1/ })
+    .first()
+    .click();
+  await page.waitForTimeout(500);
+  ok(
+    'choosing a session switches to it by id',
+    page.url().includes('?session='),
+    page.url(),
+  );
+
+  // Calendar at 320px must not overflow, and must pass axe.
+  await page.getByRole('button', { name: 'Calendar' }).click();
+  await page.waitForSelector('[role="dialog"]');
+  const calOverflow = await page.evaluate(
+    () =>
+      document.documentElement.scrollWidth -
+      document.documentElement.clientWidth,
+  );
+  ok(
+    'no horizontal overflow with the calendar open at 320px',
+    calOverflow <= 0,
+    `overflow=${calOverflow}px`,
+  );
+  const calAxe = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
+    .analyze();
+  const calSerious = calAxe.violations.filter((v) =>
+    ['serious', 'critical'].includes(v.impact),
+  );
+  ok(
+    'axe: no serious violations with the calendar open',
+    calSerious.length === 0,
+    calSerious.map((v) => `${v.id}(${v.nodes.length})`).join(', '),
+  );
+
+  // Keyboard: Escape closes the calendar and restores focus to its opener.
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(250);
+  ok(
+    'Escape closes the calendar',
+    (await page.locator('[role="dialog"]').count()) === 0,
+  );
+  const calRestored = await page.evaluate(() =>
+    document.activeElement?.textContent?.trim(),
+  );
+  ok(
+    'focus returns to the Calendar button',
+    calRestored === 'Calendar',
+    String(calRestored),
+  );
+
+  await page.screenshot({ path: file('calendar.png'), fullPage: true });
+
   // keyboard-only reachability
   await page.keyboard.press('Tab');
   const tabbed = await page.evaluate(
