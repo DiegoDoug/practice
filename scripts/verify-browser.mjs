@@ -495,6 +495,134 @@ try {
     )) <= 0,
   );
 
+  // ---------- Substitutions ----------
+  // Day 2 slot 2 is Barbell Row, which Day 6 also plans. Swapping one must not
+  // disturb the other's history.
+  await page.getByRole('button', { name: 'Day 2 · Pull' }).click();
+  await page.waitForFunction(() =>
+    document.querySelector('#day-heading')?.textContent?.includes('Day 2'),
+  );
+  await page.getByLabel('Barbell Row set 1 weight').fill('185');
+  await page.getByLabel('Barbell Row set 1 reps').fill('8');
+  await page.waitForTimeout(700);
+
+  await page
+    .locator('[data-exercise="day2:2"]')
+    .getByRole('button', { name: /^Substitute/ })
+    .click();
+  await page.waitForSelector('[role="dialog"]');
+  ok('substitute dialog opens', true);
+
+  // Logged sets belong to the movement being replaced, so this must confirm.
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('button', { name: /^Chest-Supported DB Row/ })
+    .first()
+    .click();
+  await page.waitForSelector("text=Clear this week's sets?");
+  ok('swapping a slot with logged sets asks before clearing them', true);
+
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('button', { name: 'Clear and swap' })
+    .click();
+  await page.waitForTimeout(600);
+
+  const day2Name = await page
+    .locator('[data-exercise="day2:2"] input:not([type="number"])')
+    .first()
+    .inputValue();
+  ok(
+    'the slot now shows the substitute',
+    day2Name === 'Chest-Supported DB Row',
+    day2Name,
+  );
+  ok(
+    'the swap is marked as this-week only',
+    (await page.locator('[data-exercise="day2:2"]').innerText()).includes(
+      'Swapped this week',
+    ),
+  );
+
+  // Day 6 also plans Barbell Row; its own card must be untouched.
+  await page.getByRole('button', { name: 'Day 6 · Chest/Back' }).click();
+  await page.waitForFunction(() =>
+    document.querySelector('#day-heading')?.textContent?.includes('Day 6'),
+  );
+  const day6Name = await page
+    .locator('[data-exercise="day6:3"] input:not([type="number"])')
+    .first()
+    .inputValue();
+  ok(
+    'substituting one slot leaves the same movement elsewhere alone',
+    day6Name === 'Barbell Row',
+    day6Name,
+  );
+
+  // Undo returns the planned exercise.
+  await page.getByRole('button', { name: 'Day 2 · Pull' }).click();
+  await page.waitForFunction(() =>
+    document.querySelector('#day-heading')?.textContent?.includes('Day 2'),
+  );
+  await page
+    .locator('[data-exercise="day2:2"]')
+    .getByRole('button', { name: /^Undo swap/ })
+    .click();
+  await page.waitForTimeout(600);
+  ok(
+    'undoing a swap restores the planned exercise',
+    (await page
+      .locator('[data-exercise="day2:2"] input:not([type="number"])')
+      .first()
+      .inputValue()) === 'Barbell Row',
+  );
+
+  // A custom exercise must not merge into a seeded movement of the same name.
+  await page
+    .locator('[data-exercise="day2:2"]')
+    .getByRole('button', { name: /^Substitute/ })
+    .click();
+  await page.waitForSelector('[role="dialog"]');
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('button', { name: 'Add a custom exercise' })
+    .click();
+  await page.waitForSelector('text=Exercise name');
+  await page
+    .locator('[role="dialog"]')
+    .getByLabel('Exercise name')
+    .fill('Seal Row');
+  await page
+    .locator('[role="dialog"]')
+    .getByLabel('Muscle group')
+    .fill('Length');
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('button', { name: 'Add and use it' })
+    .click();
+  await page.waitForTimeout(700);
+  ok(
+    'a custom exercise can be created and used immediately',
+    (await page
+      .locator('[data-exercise="day2:2"] input:not([type="number"])')
+      .first()
+      .inputValue()) === 'Seal Row',
+  );
+
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForSelector('[data-exercise="day2:2"]');
+  ok(
+    'the custom exercise and its swap survive a reload',
+    (await page
+      .locator('[data-exercise="day2:2"] input:not([type="number"])')
+      .first()
+      .inputValue()) === 'Seal Row',
+  );
+
+  // Back to day 1 so the remaining checks run against a known screen.
+  await page.getByRole('button', { name: /^Day 1 · / }).click();
+  await page.waitForTimeout(400);
+
   // keyboard-only reachability
   await page.keyboard.press('Tab');
   const tabbed = await page.evaluate(
