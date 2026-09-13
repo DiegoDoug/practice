@@ -193,9 +193,9 @@ export function WorkoutApp() {
   );
 
   /**
-   * Called when a set input loses focus. The rest timer starts only once the
-   * row actually holds weight and reps, so it never fires part-way through
-   * typing a number.
+   * Start the rest countdown for a set the athlete just finished logging.
+   * SetRow decides when a row counts as logged; this only adds the condition
+   * that a live, unpaused session is running.
    */
   const onSetComplete = useCallback(() => {
     if (!live.session || isPaused(live.session)) return;

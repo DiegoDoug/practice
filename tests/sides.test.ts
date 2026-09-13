@@ -7,7 +7,13 @@ import {
   countLoggedSets,
   totalVolume,
 } from '@/lib/volume';
-import { hasAnyValue, isLoggedSet, blankSet, cloneSet } from '@/lib/types';
+import {
+  hasAnyValue,
+  isCompleteSet,
+  isLoggedSet,
+  blankSet,
+  cloneSet,
+} from '@/lib/types';
 import { sideProgression, withSets } from '@/lib/workout';
 import { emptyState } from '@/lib/backup';
 import type { SetEntry, WorkoutState } from '@/lib/types';
@@ -188,5 +194,46 @@ describe('sideProgression', () => {
 
   it('returns nothing for a movement never logged', () => {
     expect(sideProgression(emptyState(), 'back-squat')).toEqual([]);
+  });
+});
+
+describe('isCompleteSet', () => {
+  const one = (weight: string, reps: string, rpe = ''): SetEntry => ({
+    weight,
+    reps,
+    rpe,
+  });
+
+  it('rejects an untouched row', () => {
+    expect(isCompleteSet(blankSet(), false)).toBe(false);
+    expect(isCompleteSet(blankSet(true), true)).toBe(false);
+  });
+
+  it('rejects a row that is only part-way typed', () => {
+    expect(isCompleteSet(one('135', ''), false)).toBe(false);
+    expect(isCompleteSet(one('', '8'), false)).toBe(false);
+    expect(isCompleteSet(one('', '', '8'), false)).toBe(false);
+  });
+
+  it('accepts weight and reps, with or without RPE', () => {
+    expect(isCompleteSet(one('135', '8'), false)).toBe(true);
+    expect(isCompleteSet(one('135', '8', '8.5'), false)).toBe(true);
+    expect(isCompleteSet(one('0', '0'), false)).toBe(true);
+  });
+
+  it('rejects whitespace and non-numeric entries', () => {
+    expect(isCompleteSet(one('  ', '8'), false)).toBe(false);
+    expect(isCompleteSet(one('abc', '8'), false)).toBe(false);
+  });
+
+  it('needs both sides of a unilateral row', () => {
+    expect(isCompleteSet(both('50', '10', '', ''), true)).toBe(false);
+    expect(isCompleteSet(both('', '', '50', '10'), true)).toBe(false);
+    expect(isCompleteSet(both('50', '10', '50', '9'), true)).toBe(true);
+  });
+
+  it('ignores the absent right side when the slot is bilateral', () => {
+    expect(isCompleteSet(one('135', '8'), false)).toBe(true);
+    expect(isCompleteSet(both('50', '10', '', ''), false)).toBe(true);
   });
 });

@@ -98,10 +98,12 @@ export function resolveSlotGroup(
   return movements[slot.movementId]?.group ?? '';
 }
 
-export const isSlotUnilateral = (
-  movements: Record<string, Movement>,
-  slot: RoutineExercise,
-): boolean => slot.unilateral ?? false;
+/**
+ * Unilateral mode is per slot, not per movement — see seedRoutine. A slot
+ * without the flag is bilateral even when its movement is marked unilateral.
+ */
+export const isSlotUnilateral = (slot: RoutineExercise): boolean =>
+  slot.unilateral ?? false;
 
 /**
  * Build a snapshot of a routine day as it stands right now, with any
@@ -134,7 +136,7 @@ export function snapshotDay(
         movementId: slot.movementId,
         name: resolveSlotName(movements, slot),
         group: resolveSlotGroup(movements, slot),
-        ...(slot.unilateral ? { unilateral: true } : {}),
+        ...(isSlotUnilateral(slot) ? { unilateral: true } : {}),
       };
     }),
   };
