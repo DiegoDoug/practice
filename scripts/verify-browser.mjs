@@ -623,6 +623,115 @@ try {
   await page.getByRole('button', { name: /^Day 1 · / }).click();
   await page.waitForTimeout(400);
 
+  // ---------- Left / right tracking ----------
+  // Turn on per-side tracking for Day 3's Walking Lunges, then log both sides.
+  await page.getByRole('button', { name: 'Day 3 · Legs' }).click();
+  await page.waitForFunction(() =>
+    document.querySelector('#day-heading')?.textContent?.includes('Day 3'),
+  );
+  const day3SetsBefore = await page
+    .locator('[data-exercise="day3:4"] input[data-set-field="weight"]')
+    .count();
+  ok('a bilateral slot has one weight input per set', day3SetsBefore === 1);
+
+  await page.getByRole('button', { name: 'Routine', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  await routine()
+    .getByRole('button', { name: /^Day 3/ })
+    .first()
+    .click();
+  await page.waitForSelector('text=Exercises');
+  await routine().getByRole('checkbox').nth(4).check();
+  await page.waitForTimeout(400);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(500);
+
+  ok(
+    'the card is marked unilateral',
+    (await page.locator('[data-exercise="day3:4"]').innerText()).includes(
+      'Unilateral',
+    ),
+  );
+  ok(
+    'one set row now has two weight inputs',
+    (await page
+      .locator('[data-exercise="day3:4"] input[data-set-field="weight"]')
+      .count()) === 2,
+  );
+
+  await page.getByLabel('Walking Lunges set 1 left weight').fill('50');
+  await page.getByLabel('Walking Lunges set 1 left reps').fill('10');
+  await page.getByLabel('Walking Lunges set 1 right weight').fill('50');
+  await page.getByLabel('Walking Lunges set 1 right reps').fill('8');
+  await page.waitForTimeout(800);
+
+  ok(
+    'a two-sided entry still counts as one logged set',
+    (await page
+      .locator('[data-exercise="day3:4"] input[data-set-field="weight"]')
+      .count()) === 2,
+  );
+
+  await page.getByRole('button', { name: 'History', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  const sessionsText = await page.locator('[role="dialog"]').innerText();
+  // 50x10 + 50x8 = 900, summed across both sides.
+  ok(
+    'history volume sums both sides',
+    sessionsText.includes('900'),
+    sessionsText.split('\n').slice(0, 10).join(' | '),
+  );
+  ok(
+    'a two-sided row is one set in history',
+    /1 logged set\b/.test(sessionsText),
+    sessionsText.split('\n').slice(0, 10).join(' | '),
+  );
+
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('tab', { name: 'Left vs right' })
+    .click();
+  await page.waitForTimeout(300);
+  const sidesText = await page.locator('[role="dialog"]').innerText();
+  ok(
+    'the side comparison lists the movement',
+    sidesText.includes('Walking Lunges'),
+    sidesText.split('\n').slice(0, 8).join(' | '),
+  );
+  ok(
+    'the side comparison reports the imbalance',
+    sidesText.includes('500') &&
+      sidesText.includes('400') &&
+      sidesText.includes('20% left'),
+    sidesText.split('\n').slice(0, 12).join(' | '),
+  );
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+
+  // CSV keeps one row per set and spells out both sides.
+  const [sideCsv] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('button', { name: 'Export CSV' }).click(),
+  ]);
+  const sideCsvText = fs.readFileSync(await sideCsv.path(), 'utf8');
+  const lungeRows = sideCsvText
+    .split('\r\n')
+    .filter((line) => line.includes('Walking Lunges'));
+  ok(
+    'a two-sided set is one CSV row',
+    lungeRows.length === 1,
+    String(lungeRows.length),
+  );
+  ok(
+    'the CSV row carries both sides',
+    lungeRows[0]?.includes('unilateral') &&
+      lungeRows[0]?.endsWith('unilateral,50,10,,50,8,'),
+    lungeRows[0],
+  );
+
+  await page.getByRole('button', { name: /^Day 1 · / }).click();
+  await page.waitForTimeout(400);
+
   // keyboard-only reachability
   await page.keyboard.press('Tab');
   const tabbed = await page.evaluate(
