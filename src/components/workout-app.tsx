@@ -7,6 +7,7 @@ import { AppSkeleton } from './app-skeleton';
 import { BackupDialog } from './backup-dialog';
 import { DayTabs } from './day-tabs';
 import { HistoryDialog } from './history-dialog';
+import { SafeModeNotice } from './safe-mode-notice';
 import { WeeklyOverview } from './weekly-overview';
 import { WorkoutDay } from './workout-day';
 import { PROGRAM, getPlannedDay, pickInitialDay } from '@/lib/program';
@@ -32,7 +33,8 @@ const SAVE_LABEL = {
 export function WorkoutApp() {
   const router = useRouter();
   const params = useSearchParams();
-  const { state, hydrated, status, update, replace, flush } = useWorkoutStore();
+  const { state, hydrated, status, safeMode, update, replace, flush } =
+    useWorkoutStore();
 
   // Resolved lazily on first render. The page renders the skeleton until the
   // store has hydrated, so this never reaches the server-rendered HTML and can
@@ -157,6 +159,14 @@ export function WorkoutApp() {
           </button>
         </div>
       </header>
+
+      {safeMode ? (
+        <SafeModeNotice
+          error={safeMode.error}
+          raw={safeMode.raw}
+          onOpenBackup={() => setBackupOpen(true)}
+        />
+      ) : null}
 
       <WeeklyOverview
         weekKey={weekKey}
