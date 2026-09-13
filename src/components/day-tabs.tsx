@@ -1,24 +1,30 @@
 'use client';
 
-import { PROGRAM } from '@/lib/program';
+import type { RoutineDay } from '@/lib/types';
 
 type DayTabsProps = {
+  days: RoutineDay[];
   activeDay: string;
   completion: Record<string, boolean>;
   onSelect: (dayId: string) => void;
 };
 
-export function DayTabs({ activeDay, completion, onSelect }: DayTabsProps) {
+export function DayTabs({
+  days,
+  activeDay,
+  completion,
+  onSelect,
+}: DayTabsProps) {
   return (
     <nav aria-label="Training days" className="mb-3.5">
       <ul className="no-scrollbar flex gap-1.5 overflow-x-auto px-0.5 pb-1">
-        {PROGRAM.map((day) => {
-          const isActive = day.id === activeDay;
+        {days.map((day) => {
+          const isActive = day.dayId === activeDay;
           return (
-            <li key={day.id} className="shrink-0">
+            <li key={day.dayId} className="shrink-0">
               <button
                 type="button"
-                onClick={() => onSelect(day.id)}
+                onClick={() => onSelect(day.dayId)}
                 aria-current={isActive ? 'page' : undefined}
                 className={[
                   'rounded-control min-h-11 border px-3 text-[13px] whitespace-nowrap transition-colors duration-150',
@@ -27,8 +33,8 @@ export function DayTabs({ activeDay, completion, onSelect }: DayTabsProps) {
                     : 'border-hairline bg-card text-muted hover:text-ocean-deep',
                 ].join(' ')}
               >
-                {day.label} · {day.name}
-                {completion[day.id] ? (
+                {day.name ? `${day.label} · ${day.name}` : day.label}
+                {completion[day.dayId] ? (
                   <span className="sr-only"> (completed)</span>
                 ) : null}
               </button>

@@ -53,14 +53,28 @@ describe('toCsv', () => {
 
 const stateWithWeek = (): WorkoutState => ({
   ...emptyState(),
-  exerciseNames: { 'day1:0': 'Bench Press, paused' },
   weeks: {
     '2026-09-07': {
       completion: { day1: true },
+      routine: {
+        day1: {
+          label: 'Day 1',
+          name: 'Push',
+          exercises: [
+            {
+              slotId: 'day1-s0',
+              movementId: 'barbell-bench-press',
+              name: 'Bench Press, paused',
+              group: 'Push',
+            },
+          ],
+        },
+      },
       days: {
         day1: {
           exercises: {
-            '0': {
+            'day1-s0': {
+              movementId: 'barbell-bench-press',
               sets: [
                 { weight: '135', reps: '8', rpe: '7' },
                 { weight: '', reps: '', rpe: '' },
@@ -73,9 +87,28 @@ const stateWithWeek = (): WorkoutState => ({
     },
     '2026-08-31': {
       completion: {},
+      routine: {
+        day1: {
+          label: 'Day 1',
+          name: 'Push',
+          exercises: [
+            {
+              slotId: 'day1-s0',
+              movementId: 'barbell-bench-press',
+              name: 'Barbell Bench Press',
+              group: 'Push',
+            },
+          ],
+        },
+      },
       days: {
         day1: {
-          exercises: { '0': { sets: [{ weight: '125', reps: '8', rpe: '' }] } },
+          exercises: {
+            'day1-s0': {
+              movementId: 'barbell-bench-press',
+              sets: [{ weight: '125', reps: '8', rpe: '' }],
+            },
+          },
         },
       },
     },
@@ -86,9 +119,21 @@ describe('buildWeekCsv', () => {
   it('writes the expected header row', () => {
     const csv = buildWeekCsv(emptyState(), '2026-09-07');
     expect(csv.split('\r\n')[0]).toBe(
-      'Week,Day,Day Name,Completed,Exercise,Muscle Group,Set,Weight,Reps,RPE',
+      'Week,Day,Day Name,Completed,Exercise,Muscle Group,Set,Weight,Reps,RPE,' +
+        'Mode,Left Weight,Left Reps,Left RPE,Right Weight,Right Reps,Right RPE',
     );
     expect(countCsvDataRows(csv)).toBe(0);
+  });
+
+  it('keeps the original ten columns as a prefix', () => {
+    // Side columns are appended, never inserted, so existing importers and the
+    // browser verification script keep working.
+    const header = buildWeekCsv(emptyState(), '2026-09-07').split('\r\n')[0];
+    expect(
+      header.startsWith(
+        'Week,Day,Day Name,Completed,Exercise,Muscle Group,Set,Weight,Reps,RPE',
+      ),
+    ).toBe(true);
   });
 
   it('exports only logged sets from the requested week', () => {
@@ -100,11 +145,11 @@ describe('buildWeekCsv', () => {
   it('escapes overridden exercise names and keeps the original set numbering', () => {
     const lines = buildWeekCsv(stateWithWeek(), '2026-09-07').split('\r\n');
     expect(lines[1]).toBe(
-      '2026-09-07,Day 1,Push,Yes,"Bench Press, paused",Push,1,135,8,7',
+      '2026-09-07,Day 1,Push,Yes,"Bench Press, paused",Push,1,135,8,7,bilateral,,,,,,',
     );
     // The blank row two is skipped but row three keeps its real index.
     expect(lines[2]).toBe(
-      '2026-09-07,Day 1,Push,Yes,"Bench Press, paused",Push,3,145,6,8.5',
+      '2026-09-07,Day 1,Push,Yes,"Bench Press, paused",Push,3,145,6,8.5,bilateral,,,,,,',
     );
   });
 

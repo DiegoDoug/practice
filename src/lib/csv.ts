@@ -1,6 +1,11 @@
-import { PROGRAM, resolveExerciseName } from './program';
-import { hasAnyValue, type WorkoutState } from './types';
+import { hasAnyValue, type SetEntry, type WorkoutState } from './types';
+import { resolveWeekRoutine } from './routine';
 
+/**
+ * The original ten columns, unchanged and in their original order, followed by
+ * the side columns. Appending rather than inserting keeps existing importers —
+ * and the header assertion in the browser verification script — working.
+ */
 export const CSV_HEADERS = [
   'Week',
   'Day',
@@ -12,6 +17,13 @@ export const CSV_HEADERS = [
   'Weight',
   'Reps',
   'RPE',
+  'Mode',
+  'Left Weight',
+  'Left Reps',
+  'Left RPE',
+  'Right Weight',
+  'Right Reps',
+  'Right RPE',
 ] as const;
 
 /** Quote a CSV field when it contains a quote, comma, or line break. */
@@ -27,32 +39,68 @@ export function toCsv(rows: (string | number)[][]): string {
   return rows.map((row) => row.map(csvEscape).join(',')).join('\r\n');
 }
 
-/** Build the CSV for one week: logged sets only, planned order preserved. */
+const sideCells = (set: SetEntry): string[] =>
+  set.right
+    ? [
+        'unilateral',
+        set.weight,
+        set.reps,
+        set.rpe,
+        set.right.weight,
+        set.right.reps,
+        set.right.rpe,
+      ]
+    : ['bilateral', '', '', '', '', '', ''];
+
+/**
+ * Build the CSV for one week: logged sets only, in the order the routine had
+ * when the week was logged. A unilateral set stays one row, with its left side
+ * in the original Weight/Reps/RPE columns and both sides spelled out after.
+ */
 export function buildWeekCsv(state: WorkoutState, key: string): string {
   const rows: (string | number)[][] = [[...CSV_HEADERS]];
   const week = state.weeks[key];
   if (!week) return toCsv(rows);
 
-  for (const day of PROGRAM) {
-    const exercises = week.days[day.id]?.exercises ?? {};
-    day.exercises.forEach((exercise, index) => {
-      const sets = exercises[String(index)]?.sets ?? [];
-      sets.forEach((set, setIndex) => {
+  for (const [dayId, dayLog] of Object.entries(week.days)) {
+    const resolved = resolveWeekRoutine(state, key, dayId);
+    const planned = resolved.exercises;
+    const plannedIds = new Set(planned.map((slot) => slot.slotId));
+    const completed = week.completion[dayId] ? 'Yes' : 'No';
+
+    // Planned slots first, in routine order, then any orphans left behind by a
+    // removed or archived slot — logged data is never silently dropped.
+    const orphans = Object.keys(dayLog.exercises).filter(
+      (slotId) => !plannedIds.has(slotId),
+    );
+
+    const emit = (slotId: string, name: string, group: string): void => {
+      const log = dayLog.exercises[slotId];
+      if (!log) return;
+      log.sets.forEach((set, setIndex) => {
         if (!hasAnyValue(set)) return;
         rows.push([
           key,
-          day.label,
-          day.name,
-          week.completion[day.id] ? 'Yes' : 'No',
-          resolveExerciseName(state.exerciseNames, day.id, index),
-          exercise.group,
+          resolved.label,
+          resolved.name,
+          completed,
+          name,
+          group,
           setIndex + 1,
           set.weight,
           set.reps,
           set.rpe,
+          ...sideCells(set),
         ]);
       });
-    });
+    };
+
+    for (const slot of planned) emit(slot.slotId, slot.name, slot.group);
+    for (const slotId of orphans) {
+      const log = dayLog.exercises[slotId];
+      const movement = log ? state.movements[log.movementId] : undefined;
+      emit(slotId, movement?.name ?? 'Unknown exercise', movement?.group ?? '');
+    }
   }
   return toCsv(rows);
 }

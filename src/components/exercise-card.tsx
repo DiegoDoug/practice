@@ -1,9 +1,9 @@
 'use client';
 
 import { useCallback, useRef, useState } from 'react';
-import { Plus, RotateCcw } from 'lucide-react';
+import { Plus, Repeat, RotateCcw } from 'lucide-react';
 import { SetRow } from './set-row';
-import { blankSet, type SetEntry } from '@/lib/types';
+import { blankSet, type SetEntry, type SideEntry } from '@/lib/types';
 import {
   formatSetSummary,
   removeSet,
@@ -15,24 +15,41 @@ import { formatWeekLabel } from '@/lib/week';
 
 type ExerciseCardProps = {
   dayId: string;
+  /** Render position — used for the DOM hook and the accessible index only. */
   index: number;
+  slotId: string;
   name: string;
   group: string;
+  unilateral: boolean;
   sets: SetEntry[];
   prior: PriorPerformance | null;
+  /** Set when the prior performance was logged under a different movement. */
+  priorNote?: string;
   onSetsChange: (sets: SetEntry[]) => void;
   onRename: (name: string) => void;
+  onSetComplete?: () => void;
+  onSubstitute?: () => void;
+  /** Set when this slot is swapped for this week only. */
+  substituted?: boolean;
+  onUndoSubstitute?: () => void;
 };
 
 export function ExerciseCard({
   dayId,
   index,
+  slotId,
   name,
   group,
+  unilateral,
   sets,
   prior,
+  priorNote,
   onSetsChange,
   onRename,
+  onSetComplete,
+  onSubstitute,
+  substituted,
+  onUndoSubstitute,
 }: ExerciseCardProps) {
   const [renamed, setRenamed] = useState(false);
   const weightInputs = useRef<(HTMLInputElement | null)[]>([]);
@@ -45,9 +62,9 @@ export function ExerciseCard({
   }, []);
 
   const addSet = useCallback(() => {
-    onSetsChange([...sets, blankSet()]);
+    onSetsChange([...sets, blankSet(unilateral)]);
     focusLastWeight();
-  }, [focusLastWeight, onSetsChange, sets]);
+  }, [focusLastWeight, onSetsChange, sets, unilateral]);
 
   const onRepeatLast = useCallback(() => {
     onSetsChange(repeatLast(sets, prior));
@@ -64,6 +81,7 @@ export function ExerciseCard({
   return (
     <li
       data-exercise={`${dayId}:${index}`}
+      data-slot={slotId}
       className="border-hairline border-b py-4 last:border-b-0 last:pb-1"
     >
       <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -71,7 +89,7 @@ export function ExerciseCard({
           <span className="sr-only">Exercise {index + 1} display name</span>
           <input
             /* Keyed on the resolved name so an external change (a restore, a
-               different day) re-seeds the field without extra state. */
+               substitution, a different day) re-seeds the field. */
             key={name}
             className="text-ocean-deep hover:border-hairline focus:border-ocean-blue focus:bg-card w-full rounded-[10px] border border-transparent bg-transparent px-1.5 py-1 text-[16px] font-bold transition-colors duration-150"
             defaultValue={name}
@@ -84,6 +102,16 @@ export function ExerciseCard({
             }}
           />
         </label>
+        {unilateral ? (
+          <span className="bg-gold-soft text-gold-ink border-gold-edge rounded-md border px-2 py-0.5 text-[11px] font-semibold">
+            Unilateral
+          </span>
+        ) : null}
+        {substituted ? (
+          <span className="bg-gold-soft text-gold-ink border-gold-edge rounded-md border px-2 py-0.5 text-[11px] font-semibold">
+            Swapped this week
+          </span>
+        ) : null}
         <span className="bg-ocean-mist/40 text-ocean-deep rounded-md px-2 py-0.5 text-[11px] font-semibold">
           {group}
         </span>
@@ -103,6 +131,7 @@ export function ExerciseCard({
             {formatSetSummary(prior.sets[0])}
           </strong>
           {prior.sets.length > 1 ? ` · ${prior.sets.length} sets` : null}
+          {priorNote ? ` · ${priorNote}` : null}
         </p>
       ) : (
         <p className="text-muted mb-2 px-1.5 text-[13px]">
@@ -128,18 +157,20 @@ export function ExerciseCard({
             exerciseName={name}
             setIndex={setIndex}
             set={set}
+            unilateral={unilateral}
             isLastRow={setIndex === sets.length - 1}
             registerWeightInput={(node) => {
               weightInputs.current[setIndex] = node;
             }}
-            onChange={(field, value) =>
-              onSetsChange(updateSet(sets, setIndex, field, value))
+            onChange={(field: keyof SideEntry, value, side) =>
+              onSetsChange(updateSet(sets, setIndex, field, value, side))
             }
             onRemove={() => {
               weightInputs.current = [];
-              onSetsChange(removeSet(sets, setIndex));
+              onSetsChange(removeSet(sets, setIndex, unilateral));
             }}
             onAdvance={addSet}
+            onSetComplete={onSetComplete}
           />
         ))}
       </div>
@@ -154,6 +185,27 @@ export function ExerciseCard({
           Add set
           <span className="sr-only">to {name}</span>
         </button>
+        {onSubstitute ? (
+          <button
+            type="button"
+            onClick={onSubstitute}
+            className="rounded-control text-ocean-blue hover:bg-mist-soft inline-flex min-h-11 items-center gap-1.5 px-1.5 text-[13px] font-semibold transition-colors duration-150"
+          >
+            <Repeat className="h-4 w-4" aria-hidden="true" />
+            Substitute
+            <span className="sr-only">{name}</span>
+          </button>
+        ) : null}
+        {substituted && onUndoSubstitute ? (
+          <button
+            type="button"
+            onClick={onUndoSubstitute}
+            className="rounded-control text-ocean-blue hover:bg-mist-soft inline-flex min-h-11 items-center gap-1.5 px-1.5 text-[13px] font-semibold transition-colors duration-150"
+          >
+            Undo swap
+            <span className="sr-only">for {name}</span>
+          </button>
+        ) : null}
         {prior ? (
           <button
             type="button"

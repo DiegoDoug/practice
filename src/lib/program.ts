@@ -124,36 +124,10 @@ export const PROGRAM: readonly PlannedDay[] = [
   },
 ] as const;
 
-export const getPlannedDay = (dayId: string): PlannedDay | undefined =>
-  PROGRAM.find((day) => day.id === dayId);
-
-export const exerciseNameKey = (dayId: string, index: number): string =>
-  `${dayId}:${index}`;
-
-/** Resolve an exercise's display name, honouring a saved template override. */
-export function resolveExerciseName(
-  overrides: Record<string, string>,
-  dayId: string,
-  index: number,
-): string {
-  const override = overrides[exerciseNameKey(dayId, index)];
-  if (override && override.trim()) return override.trim();
-  return getPlannedDay(dayId)?.exercises[index]?.name ?? '';
-}
-
 /**
- * Pick the day to open with: today's scheduled slot (Mon–Sat map to Day 1–6),
- * otherwise the first day without a completion mark, otherwise Day 1.
+ * `PROGRAM` is a seed only: the routine the user actually trains lives in
+ * `WorkoutState.routine` and is built from this by `seedRoutine()`. Day
+ * lookup, name resolution and day selection all moved to `routine.ts`.
  */
-export function pickInitialDay(
-  completion: Record<string, boolean>,
-  today: Date = new Date(),
-): string {
-  const weekday = today.getDay(); // 0 Sun … 6 Sat
-  if (weekday >= 1 && weekday <= 6) {
-    const scheduled = PROGRAM[weekday - 1];
-    if (scheduled && !completion[scheduled.id]) return scheduled.id;
-  }
-  const firstIncomplete = PROGRAM.find((day) => !completion[day.id]);
-  return firstIncomplete?.id ?? PROGRAM[0].id;
-}
+export const getSeededDay = (dayId: string): PlannedDay | undefined =>
+  PROGRAM.find((day) => day.id === dayId);

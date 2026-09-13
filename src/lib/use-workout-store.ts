@@ -13,6 +13,11 @@ export type WorkoutStore = {
   state: WorkoutState;
   hydrated: boolean;
   status: SaveStatus;
+  /**
+   * Set when stored data exists but could not be read. The app goes read-only:
+   * writing anything would overwrite a log we failed to parse.
+   */
+  safeMode: { error: string; raw: unknown } | null;
   /** Apply an immutable update and schedule a debounced save. */
   update: (updater: Updater) => void;
   /** Replace all state and persist immediately (used by backup restore). */
@@ -24,10 +29,16 @@ export function useWorkoutStore(): WorkoutStore {
   const [state, setState] = useState<WorkoutState>(emptyState);
   const [hydrated, setHydrated] = useState(false);
   const [status, setStatus] = useState<SaveStatus>('idle');
+  const [safeMode, setSafeMode] = useState<{
+    error: string;
+    raw: unknown;
+  } | null>(null);
 
   const latest = useRef(state);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pending = useRef(false);
+  /** Blocks every write path while stored data is unreadable. */
+  const readOnly = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -35,8 +46,14 @@ export function useWorkoutStore(): WorkoutStore {
       .load()
       .then((loaded) => {
         if (cancelled) return;
-        latest.current = loaded;
-        setState(loaded);
+        if (loaded.status === 'error') {
+          readOnly.current = true;
+          setSafeMode({ error: loaded.error, raw: loaded.raw });
+          setStatus('error');
+          return;
+        }
+        latest.current = loaded.state;
+        setState(loaded.state);
       })
       .catch(() => setStatus('error'))
       .finally(() => {
@@ -48,6 +65,7 @@ export function useWorkoutStore(): WorkoutStore {
   }, []);
 
   const persist = useCallback(async () => {
+    if (readOnly.current) return;
     if (!pending.current) return;
     pending.current = false;
     setStatus('saving');
@@ -80,6 +98,7 @@ export function useWorkoutStore(): WorkoutStore {
 
   const update = useCallback(
     (updater: Updater) => {
+      if (readOnly.current) return;
       setState((previous) => {
         const next = updater(previous);
         latest.current = next;
@@ -90,6 +109,10 @@ export function useWorkoutStore(): WorkoutStore {
     [schedule],
   );
 
+  /**
+   * Deliberately permitted in safe mode: restoring a backup is how a user
+   * recovers from unreadable stored data, so it clears the read-only latch.
+   */
   const replace = useCallback(async (next: WorkoutState) => {
     if (timer.current) {
       clearTimeout(timer.current);
@@ -101,6 +124,8 @@ export function useWorkoutStore(): WorkoutStore {
     try {
       await storage.save(next);
       pending.current = false;
+      readOnly.current = false;
+      setSafeMode(null);
       setStatus('saved');
     } catch {
       setStatus('error');
@@ -122,5 +147,5 @@ export function useWorkoutStore(): WorkoutStore {
     };
   }, [flush]);
 
-  return { state, hydrated, status, update, replace, flush };
+  return { state, hydrated, status, safeMode, update, replace, flush };
 }

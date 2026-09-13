@@ -78,8 +78,11 @@ describe('totalVolume and counts', () => {
 describe('summariseDay', () => {
   it('aggregates sets and volume across exercises', () => {
     const summary = summariseDay({
-      '0': { sets: [set('100', '10'), set('100', '10')] },
-      '1': { sets: [set('50', '12'), set('', '', '')] },
+      a: {
+        movementId: 'back-squat',
+        sets: [set('100', '10'), set('100', '10')],
+      },
+      b: { movementId: 'leg-press', sets: [set('50', '12'), set('', '', '')] },
     });
     expect(summary.sets).toBe(3);
     expect(summary.volume).toBe(1000 + 1000 + 600);
