@@ -326,6 +326,175 @@ try {
       .inputValue()) === '125',
   );
 
+  // ---------- Routine builder ----------
+  // The highest-value assertion in this file: renaming a day must not rewrite
+  // what an already-logged session says it was.
+  await page.getByRole('button', { name: 'Routine', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  ok('routine dialog opens', true);
+
+  // Scope every routine interaction to the dialog: the week cards and day
+  // tabs behind the overlay also match these names.
+  const routine = () => page.locator('[role="dialog"]');
+
+  await routine()
+    .getByRole('button', { name: /^Day 1/ })
+    .first()
+    .click();
+  await page.waitForSelector('text=Workout name');
+  const nameField = routine().getByLabel('Workout name');
+  await nameField.fill('Chest, Shoulders & Triceps');
+  await nameField.blur();
+  await page.waitForTimeout(400);
+
+  await routine().getByRole('button', { name: 'All days' }).click();
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(400);
+
+  ok(
+    'renaming a day updates the current day screen',
+    (await page.textContent('#day-heading')).includes(
+      'Chest, Shoulders & Triceps',
+    ),
+    await page.textContent('#day-heading'),
+  );
+
+  await page.getByRole('button', { name: 'History', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  const historyAfterRename = await page.locator('[role="dialog"]').innerText();
+  // Two halves of the snapshot invariant. The restored earlier week is frozen
+  // and must keep "Push"; the current week's day is still in progress, so by
+  // design it follows the rename.
+  ok(
+    'a past session keeps the name it was logged under',
+    historyAfterRename.includes('Push'),
+    historyAfterRename.split('\n').slice(0, 10).join(' | '),
+  );
+  ok(
+    'an in-progress week follows the rename',
+    historyAfterRename.includes('Chest, Shoulders & Triceps'),
+  );
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+
+  // Reordering must move logged data with the exercise, not with the position.
+  // Write a distinctive value first so the assertion does not depend on what
+  // earlier steps happened to leave behind.
+  await page.getByLabel('Barbell Bench Press set 1 weight').fill('205');
+  await page.getByLabel('Barbell Bench Press set 1 reps').fill('3');
+  await page.waitForTimeout(700);
+  const firstBefore = await page
+    .locator('[data-exercise="day1:0"] input[data-set-field="weight"]')
+    .first()
+    .inputValue();
+  ok(
+    'day 1 slot 0 holds the value just entered',
+    firstBefore === '205',
+    firstBefore,
+  );
+
+  await page.getByRole('button', { name: 'Routine', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  await routine()
+    .getByRole('button', { name: /^Day 1/ })
+    .first()
+    .click();
+  await page.waitForSelector('text=Exercises');
+  await routine()
+    .getByRole('button', { name: /^Move Barbell Bench Press down$/ })
+    .click();
+  await page.waitForTimeout(300);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(400);
+
+  const movedName = await page
+    .locator('[data-exercise="day1:1"] input:not([type="number"])')
+    .first()
+    .inputValue();
+  const movedWeight = await page
+    .locator('[data-exercise="day1:1"] input[data-set-field="weight"]')
+    .first()
+    .inputValue();
+  ok(
+    'reorder moves the exercise',
+    movedName === 'Barbell Bench Press',
+    movedName,
+  );
+  ok(
+    'logged data follows the exercise, not the position',
+    movedWeight === '205',
+    movedWeight,
+  );
+
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForSelector('[data-exercise="day1:1"]');
+  ok(
+    'reorder survives a reload',
+    (await page
+      .locator('[data-exercise="day1:1"] input:not([type="number"])')
+      .first()
+      .inputValue()) === 'Barbell Bench Press',
+  );
+
+  // Removing a slot with history keeps its logs in History and CSV.
+  const historyRowsBefore = (
+    await (async () => {
+      await page.getByRole('button', { name: 'History', exact: true }).click();
+      await page.waitForSelector('[role="dialog"]');
+      const text = await page.locator('[role="dialog"]').innerText();
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(250);
+      return text;
+    })()
+  ).includes('Day 1');
+
+  await page.getByRole('button', { name: 'Routine', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  await routine()
+    .getByRole('button', { name: /^Day 1/ })
+    .first()
+    .click();
+  await page.waitForSelector('text=Exercises');
+  await routine()
+    .getByRole('button', { name: /^Remove Barbell Bench Press from the plan/ })
+    .click();
+  await page.waitForTimeout(300);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(400);
+
+  await page.getByRole('button', { name: 'History', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  const historyAfterRemove = await page.locator('[role="dialog"]').innerText();
+  ok(
+    'a removed exercise keeps its session in history',
+    historyRowsBefore && historyAfterRemove.includes('Day 1'),
+    historyAfterRemove.split('\n').slice(0, 6).join(' | '),
+  );
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+
+  // Adding a day, then confirming the week grid grew.
+  await page.getByRole('button', { name: 'Routine', exact: true }).click();
+  await page.waitForSelector('[role="dialog"]');
+  await routine().getByRole('button', { name: 'Add day', exact: true }).click();
+  await page.waitForTimeout(300);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(400);
+  ok(
+    'adding a day grows the week overview beyond six',
+    (await page
+      .locator('section[aria-labelledby="week-heading"] ul > li')
+      .count()) === 7,
+  );
+  ok(
+    'no horizontal overflow at 320px with seven days',
+    (await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    )) <= 0,
+  );
+
   // keyboard-only reachability
   await page.keyboard.press('Tab');
   const tabbed = await page.evaluate(
@@ -385,6 +554,8 @@ try {
   );
 } catch (error) {
   ok('verification run completed', false, String(error).split('\n')[0]);
+  // Full stack: the first line alone rarely names the failing locator.
+  console.error('\n--- verification error ---\n', error);
 } finally {
   await browser.close();
   console.log(out.join('\n'));

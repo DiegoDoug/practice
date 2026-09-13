@@ -2,11 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Archive, FileDown, History } from 'lucide-react';
+import { Archive, FileDown, History, ListChecks } from 'lucide-react';
 import { AppSkeleton } from './app-skeleton';
 import { BackupDialog } from './backup-dialog';
 import { DayTabs } from './day-tabs';
 import { HistoryDialog } from './history-dialog';
+import { RoutineDialog } from './routine-dialog';
+import { MovementPicker } from './movement-picker';
+import { Dialog } from './dialog';
 import { SafeModeNotice } from './safe-mode-notice';
 import { WeeklyOverview } from './weekly-overview';
 import { WorkoutDay } from './workout-day';
@@ -18,9 +21,11 @@ import type { SetEntry, WorkoutState } from '@/lib/types';
 import { getWeek, withCompletion, withSets } from '@/lib/workout';
 import {
   activeDays,
+  addExercise,
   findDay,
   findSlot,
   pickInitialDay,
+  refreshOpenSnapshots,
   renameSlot,
   resolveWeekRoutine,
 } from '@/lib/routine';
@@ -45,6 +50,8 @@ export function WorkoutApp() {
 
   const [historyOpen, setHistoryOpen] = useState(false);
   const [backupOpen, setBackupOpen] = useState(false);
+  const [routineOpen, setRoutineOpen] = useState(false);
+  const [addingToDay, setAddingToDay] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState('');
 
   const week = useMemo(() => getWeek(state, weekKey), [state, weekKey]);
@@ -146,6 +153,33 @@ export function WorkoutApp() {
     setAnnouncement(`Exported ${countCsvDataRows(csv)} logged sets as CSV.`);
   }, [flush, state, weekKey]);
 
+  /**
+   * Apply a routine edit, then re-freeze the current week's snapshots so an
+   * in-progress, not-yet-complete day reflects the change while finished
+   * sessions and past weeks keep what they were logged under.
+   */
+  const onRoutineEdit = useCallback(
+    (edit: (previous: WorkoutState) => WorkoutState, message: string) => {
+      update((previous) => refreshOpenSnapshots(edit(previous), weekKey));
+      setAnnouncement(message);
+    },
+    [update, weekKey],
+  );
+
+  const onPickExercise = useCallback(
+    (movementId: string) => {
+      const dayId = addingToDay;
+      if (!dayId) return;
+      setAddingToDay(null);
+      const name = state.movements[movementId]?.name ?? 'Exercise';
+      onRoutineEdit(
+        (previous) => addExercise(previous, dayId, movementId),
+        `${name} added.`,
+      );
+    },
+    [addingToDay, onRoutineEdit, state.movements],
+  );
+
   const onRestore = useCallback(
     async (next: WorkoutState) => {
       await replace(next);
@@ -185,6 +219,14 @@ export function WorkoutApp() {
           >
             <Archive className="h-4 w-4" aria-hidden="true" />
             Backup
+          </button>
+          <button
+            type="button"
+            onClick={() => setRoutineOpen(true)}
+            className="rounded-control border-hairline bg-card text-ocean-deep hover:bg-mist-soft inline-flex min-h-11 items-center gap-1.5 border px-3 text-[13px] font-semibold transition-colors duration-150"
+          >
+            <ListChecks className="h-4 w-4" aria-hidden="true" />
+            Routine
           </button>
         </div>
       </header>
@@ -276,6 +318,21 @@ export function WorkoutApp() {
         onClose={() => setHistoryOpen(false)}
         state={state}
       />
+      <RoutineDialog
+        open={routineOpen}
+        onClose={() => setRoutineOpen(false)}
+        state={state}
+        onEdit={onRoutineEdit}
+        onAddExercise={setAddingToDay}
+      />
+      <Dialog
+        open={addingToDay !== null}
+        onClose={() => setAddingToDay(null)}
+        title="Add an exercise"
+        description="Pick a movement from your library."
+      >
+        <MovementPicker movements={state.movements} onPick={onPickExercise} />
+      </Dialog>
       <BackupDialog
         open={backupOpen}
         onClose={() => setBackupOpen(false)}
