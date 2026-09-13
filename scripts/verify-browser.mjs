@@ -1171,6 +1171,221 @@ try {
     String(calRestored),
   );
 
+  // ---------- Progress and records ----------
+  // By this point day 1 has several sessions, so the legacy link resolves to
+  // the chooser rather than a day screen; pick one explicitly.
+  await page.goto(`${BASE}/?day=day1`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(600);
+  if ((await page.locator('main').innerText()).includes('Which session?')) {
+    await page
+      .locator('main')
+      .getByRole('button', { name: /Day 1|Extra workout/ })
+      .first()
+      .click();
+    await page.waitForTimeout(600);
+  }
+  const prExercise = await page
+    .locator('[data-exercise] input:not([type="number"])')
+    .first()
+    .inputValue();
+
+  // Start from a known state: earlier sections may have left this row ticked.
+  if (
+    (await page
+      .getByRole('button', { name: `Reopen ${prExercise} set 1` })
+      .count()) > 0
+  ) {
+    await page
+      .getByRole('button', { name: `Reopen ${prExercise} set 1` })
+      .click();
+    await page.waitForTimeout(400);
+  }
+
+  // A clearly record-breaking set, ticked explicitly.
+  await page.getByLabel(`${prExercise} set 1 weight`).fill('315');
+  await page.getByLabel(`${prExercise} set 1 reps`).fill('9');
+  await page.waitForTimeout(500);
+  const liveRegion = () => page.locator('[role="status"][aria-live="polite"]');
+  await page
+    .getByRole('button', { name: `Complete ${prExercise} set 1` })
+    .click();
+  await page.waitForTimeout(800);
+  ok(
+    'completing a record set announces it',
+    (await liveRegion().innerText()).includes('New record'),
+    (await liveRegion().innerText()).slice(0, 90),
+  );
+
+  // Reopening and re-ticking the SAME set must not celebrate again.
+  //
+  // Asserted against the stored celebration keys rather than the live region:
+  // the region keeps whatever was last announced, so it cannot distinguish
+  // "nothing new was announced" from "the old text is still sitting there".
+  const celebrated = () =>
+    page.evaluate(
+      async () =>
+        await new Promise((res) => {
+          const open = indexedDB.open('keyval-store', 1);
+          open.onupgradeneeded = () => open.result.createObjectStore('keyval');
+          open.onsuccess = () => {
+            const r = open.result
+              .transaction('keyval', 'readonly')
+              .objectStore('keyval')
+              .get('weekly-practice-log/celebrated');
+            r.onsuccess = () => res(r.result ?? []);
+            r.onerror = () => res([]);
+          };
+          open.onerror = () => res([]);
+        }),
+    );
+
+  const keysAfterFirst = await celebrated();
+  ok(
+    'the celebration is remembered',
+    keysAfterFirst.length > 0,
+    JSON.stringify(keysAfterFirst).slice(0, 120),
+  );
+
+  await page
+    .getByRole('button', { name: `Reopen ${prExercise} set 1` })
+    .click();
+  await page.waitForTimeout(500);
+  await page
+    .getByRole('button', { name: `Complete ${prExercise} set 1` })
+    .click();
+  await page.waitForTimeout(900);
+  const keysAfterSecond = await celebrated();
+  ok(
+    're-completing an unchanged set celebrates nothing new',
+    JSON.stringify(keysAfterSecond) === JSON.stringify(keysAfterFirst),
+    `${JSON.stringify(keysAfterFirst).slice(0, 80)} -> ${JSON.stringify(keysAfterSecond).slice(0, 80)}`,
+  );
+
+  // Reloading must not celebrate anything on hydration.
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForTimeout(900);
+  ok(
+    'hydration never celebrates a record',
+    !(await liveRegion().innerText()).includes('New record'),
+    (await liveRegion().innerText()).slice(0, 90),
+  );
+
+  await page.getByRole('button', { name: 'Progress' }).click();
+  await page.waitForSelector('[role="dialog"]');
+  ok(
+    'progress dialog opens',
+    (await page.locator('[role="dialog"]').count()) === 1,
+  );
+  ok(
+    'it lists exercises that have been trained',
+    (await page.textContent('[role="dialog"]')).includes(
+      'Exercises you have trained',
+    ),
+  );
+
+  const pickExercise = async () => {
+    const dialogText = await page.textContent('[role="dialog"]');
+    if (dialogText.includes('Change exercise')) return;
+    await page
+      .locator('[role="dialog"]')
+      .getByRole('button', { name: new RegExp(prExercise) })
+      .first()
+      .click();
+    await page.waitForTimeout(500);
+  };
+  await pickExercise();
+  const progressText = await page.textContent('[role="dialog"]');
+  ok('records are shown', progressText.includes('Records'), '');
+  ok(
+    'the heaviest completed load appears',
+    progressText.includes('315'),
+    progressText.slice(0, 120),
+  );
+  ok(
+    'a best-weight-at-reps reading is offered',
+    progressText.includes('Best weight at a rep count'),
+  );
+  ok('the session history is listed', progressText.includes('Sessions'));
+
+  // The period selector filters, and says why undated history is withheld.
+  await page.getByLabel('Period').selectOption('all');
+  await page.waitForTimeout(400);
+  ok(
+    'all-time drops the undated-history caveat',
+    !(await page.textContent('[role="dialog"]')).includes(
+      'appear only under All time',
+    ),
+  );
+  await page.getByLabel('Period').selectOption('4w');
+  await page.waitForTimeout(400);
+  ok(
+    'a bounded period explains that undated workouts are excluded',
+    (await page.textContent('[role="dialog"]')).includes(
+      'appear only under All time',
+    ),
+  );
+
+  // Switching the display unit must not change what was recorded.
+  const before315 = (await page.textContent('[role="dialog"]')).includes('315');
+  ok('the record reads in the unit it was logged in', before315);
+
+  const progressAxe = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
+    .analyze();
+  const progressSerious = progressAxe.violations.filter((v) =>
+    ['serious', 'critical'].includes(v.impact),
+  );
+  ok(
+    'axe: no serious violations with the progress dialog open',
+    progressSerious.length === 0,
+    progressSerious.map((v) => `${v.id}(${v.nodes.length})`).join(', '),
+  );
+  const progressOverflow = await page.evaluate(
+    () =>
+      document.documentElement.scrollWidth -
+      document.documentElement.clientWidth,
+  );
+  ok(
+    'no horizontal overflow with progress open at 320px',
+    progressOverflow <= 0,
+    `overflow=${progressOverflow}px`,
+  );
+
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(250);
+  ok(
+    'Escape closes the progress dialog',
+    (await page.locator('[role="dialog"]').count()) === 0,
+  );
+
+  // A warmup must not hold a record.
+  await page.getByLabel(`${prExercise} set 1 type`).selectOption('warmup');
+  await page.waitForTimeout(600);
+  await page.getByRole('button', { name: 'Progress' }).click();
+  await page.waitForSelector('[role="dialog"]');
+  await pickExercise();
+  // Scoped to the records table: a warmup is still real work, so it rightly
+  // stays in the session history and in the volume figures — it just cannot
+  // hold a record.
+  const recordsTable = page.locator(
+    '[role="region"][aria-label="Records table"]',
+  );
+  const recordsText =
+    (await recordsTable.count()) > 0 ? await recordsTable.innerText() : '';
+  ok(
+    'a warmup set holds no record',
+    !recordsText.includes('315'),
+    recordsText.replace(/\n/g, ' | ').slice(0, 120),
+  );
+  ok(
+    'the warmup still appears in the session history',
+    (await page.textContent('[role="dialog"]')).includes('315'),
+  );
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(250);
+  await page.getByLabel(`${prExercise} set 1 type`).selectOption('working');
+  await page.waitForTimeout(500);
+
   // ---------- Timer isolation between sessions ----------
   const liveTimer = () =>
     page.evaluate(

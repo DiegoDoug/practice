@@ -36,7 +36,15 @@ type ExerciseCardProps = {
   onSetsChange: (sets: SetEntry[]) => void;
   onRename: (name: string) => void;
   /** Called only when a set actually transitions into completed. */
-  onSetComplete?: () => void;
+  onSetComplete?: (
+    slotId: string,
+    sets: SetEntry[],
+    setId?: string,
+    movementId?: string,
+    unilateral?: boolean,
+  ) => void;
+  /** The movement actually performed, for the record check. */
+  movementId?: string;
   onSubstitute?: () => void;
   /** Set when this slot is swapped for this week only. */
   substituted?: boolean;
@@ -51,6 +59,7 @@ export function ExerciseCard({
   group,
   unilateral,
   loadMode,
+  movementId,
   sets,
   prior,
   priorNote,
@@ -96,9 +105,25 @@ export function ExerciseCard({
       );
       if (next === sets) return;
       onSetsChange(next);
-      onSetComplete?.();
+      // The new sets travel with the callback: the store write has not landed
+      // yet, so the record check needs the values rather than the state.
+      onSetComplete?.(
+        slotId,
+        next,
+        next[setIndex]?.setId,
+        movementId,
+        unilateral,
+      );
     },
-    [loadMode, onSetComplete, onSetsChange, sets, unilateral],
+    [
+      loadMode,
+      movementId,
+      onSetComplete,
+      onSetsChange,
+      sets,
+      slotId,
+      unilateral,
+    ],
   );
 
   const onRepeatLast = useCallback(() => {

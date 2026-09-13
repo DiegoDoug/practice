@@ -33,7 +33,13 @@ type WorkoutDayProps = {
   onToggleComplete: () => void;
   onSetsChange: (slotId: string, sets: SetEntry[]) => void;
   onRename: (slotId: string, name: string) => void;
-  onSetComplete?: () => void;
+  onSetComplete?: (
+    slotId: string,
+    sets: SetEntry[],
+    setId?: string,
+    movementId?: string,
+    unilateral?: boolean,
+  ) => void;
   onSubstitute: (slotId: string) => void;
   onUndoSubstitute: (slotId: string) => void;
   /** Only offered for an ad-hoc workout; a routine day is edited in Routine. */
@@ -165,6 +171,7 @@ export function WorkoutDay({
                 group={slot.group}
                 unilateral={Boolean(slot.unilateral)}
                 loadMode={slot.loadMode}
+                movementId={slot.movementId}
                 sets={getSets(
                   state,
                   sessionId,
