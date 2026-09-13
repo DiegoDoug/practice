@@ -2,15 +2,19 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Archive, FileDown, History, ListChecks } from 'lucide-react';
+import { Archive, FileDown, History, ListChecks, Play } from 'lucide-react';
 import { AppSkeleton } from './app-skeleton';
 import { BackupDialog } from './backup-dialog';
 import { DayTabs } from './day-tabs';
 import { HistoryDialog } from './history-dialog';
 import { RoutineDialog } from './routine-dialog';
 import { MovementPicker } from './movement-picker';
+import { SubstituteDialog, type SubstituteTarget } from './substitute-dialog';
 import { Dialog } from './dialog';
 import { SafeModeNotice } from './safe-mode-notice';
+import { LiveSessionBar } from './live-session-bar';
+import { useLiveSession } from '@/lib/use-live-session';
+import { isPaused } from '@/lib/live-session';
 import { WeeklyOverview } from './weekly-overview';
 import { WorkoutDay } from './workout-day';
 import { buildWeekCsv, countCsvDataRows, weekCsvFilename } from '@/lib/csv';
@@ -21,14 +25,19 @@ import type { SetEntry, WorkoutState } from '@/lib/types';
 import { getWeek, withCompletion, withSets } from '@/lib/workout';
 import {
   activeDays,
+  addCustomMovement,
   addExercise,
+  clearWeekSubstitution,
   findDay,
-  findSlot,
   pickInitialDay,
   refreshOpenSnapshots,
   renameSlot,
   resolveWeekRoutine,
+  slotHasSetsThisWeek,
+  substituteForWeek,
+  substitutePermanently,
 } from '@/lib/routine';
+import type { Movement } from '@/lib/types';
 
 const SAVE_LABEL = {
   idle: 'Autosave is on',
@@ -42,6 +51,7 @@ export function WorkoutApp() {
   const params = useSearchParams();
   const { state, hydrated, status, safeMode, update, replace, flush } =
     useWorkoutStore();
+  const live = useLiveSession();
 
   // Resolved lazily on first render. The page renders the skeleton until the
   // store has hydrated, so this never reaches the server-rendered HTML and can
@@ -52,6 +62,9 @@ export function WorkoutApp() {
   const [backupOpen, setBackupOpen] = useState(false);
   const [routineOpen, setRoutineOpen] = useState(false);
   const [addingToDay, setAddingToDay] = useState<string | null>(null);
+  const [substituting, setSubstituting] = useState<SubstituteTarget | null>(
+    null,
+  );
   const [announcement, setAnnouncement] = useState('');
 
   const week = useMemo(() => getWeek(state, weekKey), [state, weekKey]);
@@ -92,17 +105,16 @@ export function WorkoutApp() {
     (slotId: string, sets: SetEntry[]) => {
       if (!activeDay) return;
       update((previous) => {
-        // The movement recorded is always the slot's current one, never the
-        // movement a prior performance was logged under.
-        const slot = findSlot(findDay(previous.routine, activeDay), slotId);
-        const snapshot = resolveWeekRoutine(
+        // The movement recorded is what THIS WEEK plans — which includes a
+        // one-off swap — never the movement a prior performance was logged
+        // under.
+        const planned = resolveWeekRoutine(
           previous,
           weekKey,
           activeDay,
         ).exercises.find((entry) => entry.slotId === slotId);
-        const movementId =
-          slot?.movementId ?? snapshot?.movementId ?? 'unknown';
-        const unilateral = slot?.unilateral ?? snapshot?.unilateral;
+        const movementId = planned?.movementId ?? 'unknown';
+        const unilateral = planned?.unilateral;
         return withSets(
           previous,
           weekKey,
@@ -180,6 +192,107 @@ export function WorkoutApp() {
     [addingToDay, onRoutineEdit, state.movements],
   );
 
+  /**
+   * Called when a set input loses focus. The rest timer starts only once the
+   * row actually holds weight and reps, so it never fires part-way through
+   * typing a number.
+   */
+  const onSetComplete = useCallback(() => {
+    if (!live.session || isPaused(live.session)) return;
+    live.startRest();
+  }, [live]);
+
+  const onStartWorkout = useCallback(() => {
+    if (!activeDay) return;
+    live.start(weekKey, activeDay);
+    setAnnouncement('Workout started.');
+  }, [activeDay, live, weekKey]);
+
+  const onFinishWorkout = useCallback(() => {
+    const session = live.session;
+    live.finish();
+    if (session) {
+      // Finishing writes to the week the session began in, not whatever week
+      // it happens to be when the athlete taps the button.
+      update((previous) =>
+        withCompletion(previous, session.weekKey, session.dayId, true),
+      );
+    }
+    setAnnouncement('Workout finished and marked complete.');
+  }, [live, update]);
+
+  const onOpenSubstitute = useCallback(
+    (slotId: string) => {
+      if (!activeDay) return;
+      const planned = resolveWeekRoutine(
+        state,
+        weekKey,
+        activeDay,
+      ).exercises.find((entry) => entry.slotId === slotId);
+      if (!planned) return;
+      setSubstituting({
+        dayId: activeDay,
+        slotId,
+        movementId: planned.movementId,
+        name: planned.name,
+        hasSetsThisWeek: slotHasSetsThisWeek(state, weekKey, activeDay, slotId),
+      });
+    },
+    [activeDay, state, weekKey],
+  );
+
+  const onSubstitute = useCallback(
+    (movementId: string, permanent: boolean) => {
+      const target = substituting;
+      if (!target) return;
+      const name = state.movements[movementId]?.name ?? 'the new exercise';
+      update((previous) =>
+        permanent
+          ? substitutePermanently(
+              previous,
+              weekKey,
+              target.dayId,
+              target.slotId,
+              movementId,
+            )
+          : substituteForWeek(
+              previous,
+              weekKey,
+              target.dayId,
+              target.slotId,
+              movementId,
+            ),
+      );
+      setAnnouncement(
+        permanent
+          ? `${target.name} replaced with ${name} from now on.`
+          : `${target.name} replaced with ${name} for this week.`,
+      );
+    },
+    [state.movements, substituting, update, weekKey],
+  );
+
+  const onUndoSubstitute = useCallback(
+    (slotId: string) => {
+      if (!activeDay) return;
+      update((previous) =>
+        clearWeekSubstitution(previous, weekKey, activeDay, slotId),
+      );
+      setAnnouncement('Swap undone. The planned exercise is back.');
+    },
+    [activeDay, update, weekKey],
+  );
+
+  const onCreateMovement = useCallback(
+    (movement: Omit<Movement, 'id' | 'custom'>): string | null => {
+      if (!movement.name.trim()) return null;
+      const { state: next, id } = addCustomMovement(state, movement);
+      update(() => next);
+      return id;
+    },
+    [state, update],
+  );
+
   const onRestore = useCallback(
     async (next: WorkoutState) => {
       await replace(next);
@@ -255,6 +368,20 @@ export function WorkoutApp() {
       />
 
       <main>
+        {live.session && live.session.dayId === activeDay ? (
+          <LiveSessionBar
+            session={live.session}
+            dayTitle={
+              day?.name ? `${day.label} — ${day.name}` : (day?.label ?? '')
+            }
+            onPause={live.pause}
+            onResume={live.resume}
+            onFinish={onFinishWorkout}
+            onSkipRest={live.skipRest}
+            onExtendRest={live.extendRest}
+          />
+        ) : null}
+
         {day && activeDay ? (
           <WorkoutDay
             day={day}
@@ -264,6 +391,9 @@ export function WorkoutApp() {
             onToggleComplete={onToggleComplete}
             onSetsChange={onSetsChange}
             onRename={onRename}
+            onSubstitute={onOpenSubstitute}
+            onUndoSubstitute={onUndoSubstitute}
+            onSetComplete={onSetComplete}
           />
         ) : (
           <section className="rounded-card border-hairline bg-card border p-6 text-center">
@@ -288,6 +418,16 @@ export function WorkoutApp() {
             {SAVE_LABEL[status]}
           </p>
           <div className="flex flex-wrap gap-2">
+            {day && activeDay && !live.session ? (
+              <button
+                type="button"
+                onClick={onStartWorkout}
+                className="rounded-control bg-ocean-blue hover:bg-ocean-deep inline-flex min-h-11 items-center gap-1.5 px-3 text-[13px] font-semibold text-white transition-colors duration-150"
+              >
+                <Play className="h-4 w-4" aria-hidden="true" />
+                Start workout
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={onExportCsv}
@@ -333,6 +473,14 @@ export function WorkoutApp() {
       >
         <MovementPicker movements={state.movements} onPick={onPickExercise} />
       </Dialog>
+      <SubstituteDialog
+        open={substituting !== null}
+        onClose={() => setSubstituting(null)}
+        state={state}
+        target={substituting}
+        onSubstitute={onSubstitute}
+        onCreateMovement={onCreateMovement}
+      />
       <BackupDialog
         open={backupOpen}
         onClose={() => setBackupOpen(false)}

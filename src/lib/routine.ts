@@ -103,21 +103,40 @@ export const isSlotUnilateral = (
   slot: RoutineExercise,
 ): boolean => slot.unilateral ?? false;
 
-/** Build a snapshot of a routine day exactly as it stands right now. */
+/**
+ * Build a snapshot of a routine day as it stands right now, with any
+ * this-week substitutions applied. A substituted slot reports the substitute's
+ * own name and group, and drops the slot's name override, which described the
+ * movement being replaced.
+ */
 export function snapshotDay(
   movements: Record<string, Movement>,
   day: RoutineDay,
+  substitutions: Record<string, string> = {},
 ): RoutineDaySnapshot {
   return {
     label: day.label,
     name: day.name,
-    exercises: day.exercises.map((slot) => ({
-      slotId: slot.slotId,
-      movementId: slot.movementId,
-      name: resolveSlotName(movements, slot),
-      group: resolveSlotGroup(movements, slot),
-      ...(slot.unilateral ? { unilateral: true } : {}),
-    })),
+    exercises: day.exercises.map((slot) => {
+      const substituteId = substitutions[slot.slotId];
+      const substitute = substituteId ? movements[substituteId] : undefined;
+      if (substitute) {
+        return {
+          slotId: slot.slotId,
+          movementId: substitute.id,
+          name: substitute.name,
+          group: substitute.group,
+          ...(substitute.unilateral ? { unilateral: true } : {}),
+        };
+      }
+      return {
+        slotId: slot.slotId,
+        movementId: slot.movementId,
+        name: resolveSlotName(movements, slot),
+        group: resolveSlotGroup(movements, slot),
+        ...(slot.unilateral ? { unilateral: true } : {}),
+      };
+    }),
   };
 }
 
@@ -189,7 +208,7 @@ export function refreshOpenSnapshots(
       next,
       currentWeekKey,
       dayId,
-      snapshotDay(state.movements, day),
+      snapshotDay(state.movements, day, week.substitutions),
     );
   }
   return next;
@@ -208,7 +227,13 @@ export function resolveWeekRoutine(
   const snapshot = state.weeks[weekKey]?.routine?.[dayId];
   if (snapshot) return snapshot;
   const day = findDay(state.routine, dayId);
-  if (day) return snapshotDay(state.movements, day);
+  if (day) {
+    return snapshotDay(
+      state.movements,
+      day,
+      state.weeks[weekKey]?.substitutions,
+    );
+  }
   return { label: dayId, name: '', exercises: [] };
 }
 
@@ -506,4 +531,131 @@ export function pickInitialDay(
   }
   const firstIncomplete = days.find((day) => !completion[day.dayId]);
   return (firstIncomplete ?? days[0]).dayId;
+}
+
+// --- Substitution --------------------------------------------------------
+
+/** The movement a slot is actually being performed as in a given week. */
+export function effectiveMovementId(
+  state: WorkoutState,
+  weekKey: string,
+  dayId: string,
+  slotId: string,
+): string {
+  const resolved = resolveWeekRoutine(state, weekKey, dayId).exercises.find(
+    (slot) => slot.slotId === slotId,
+  );
+  if (resolved) return resolved.movementId;
+  return findSlot(findDay(state.routine, dayId), slotId)?.movementId ?? '';
+}
+
+/** True when this week already holds logged sets for a slot. */
+export function slotHasSetsThisWeek(
+  state: WorkoutState,
+  weekKey: string,
+  dayId: string,
+  slotId: string,
+): boolean {
+  const sets = state.weeks[weekKey]?.days[dayId]?.exercises[slotId]?.sets ?? [];
+  return sets.some(
+    (set) =>
+      set.weight.trim() !== '' ||
+      set.reps.trim() !== '' ||
+      set.rpe.trim() !== '' ||
+      Boolean(
+        set.right &&
+        (set.right.weight.trim() !== '' ||
+          set.right.reps.trim() !== '' ||
+          set.right.rpe.trim() !== ''),
+      ),
+  );
+}
+
+/**
+ * Swap a slot's movement for this week only, leaving the routine alone.
+ *
+ * The swap is recorded on the week rather than baked into the snapshot, so a
+ * later routine edit — which re-freezes open snapshots — cannot undo it. Any
+ * log rows for the slot are cleared, because they belong to the movement being
+ * replaced; callers are expected to confirm first.
+ */
+export function substituteForWeek(
+  state: WorkoutState,
+  weekKey: string,
+  dayId: string,
+  slotId: string,
+  movementId: string,
+): WorkoutState {
+  const week = state.weeks[weekKey] ?? { days: {}, completion: {} };
+  const day = week.days[dayId];
+  const exercises = { ...(day?.exercises ?? {}) };
+  delete exercises[slotId];
+
+  const withSubstitution: WorkoutState = {
+    ...state,
+    weeks: {
+      ...state.weeks,
+      [weekKey]: {
+        ...week,
+        days: { ...week.days, [dayId]: { exercises } },
+        substitutions: { ...(week.substitutions ?? {}), [slotId]: movementId },
+      },
+    },
+  };
+
+  const routineDay = findDay(withSubstitution.routine, dayId);
+  if (!routineDay) return withSubstitution;
+  return writeSnapshot(
+    withSubstitution,
+    weekKey,
+    dayId,
+    snapshotDay(
+      withSubstitution.movements,
+      routineDay,
+      withSubstitution.weeks[weekKey].substitutions,
+    ),
+  );
+}
+
+/** Drop a this-week swap, returning the slot to what the routine plans. */
+export function clearWeekSubstitution(
+  state: WorkoutState,
+  weekKey: string,
+  dayId: string,
+  slotId: string,
+): WorkoutState {
+  const week = state.weeks[weekKey];
+  if (!week?.substitutions?.[slotId]) return state;
+
+  const substitutions = { ...week.substitutions };
+  delete substitutions[slotId];
+
+  const cleared: WorkoutState = {
+    ...state,
+    weeks: { ...state.weeks, [weekKey]: { ...week, substitutions } },
+  };
+  const routineDay = findDay(cleared.routine, dayId);
+  if (!routineDay) return cleared;
+  return writeSnapshot(
+    cleared,
+    weekKey,
+    dayId,
+    snapshotDay(cleared.movements, routineDay, substitutions),
+  );
+}
+
+/**
+ * Make a swap permanent: point the routine slot at the new movement and drop
+ * the week-scoped override so the two cannot disagree.
+ */
+export function substitutePermanently(
+  state: WorkoutState,
+  weekKey: string,
+  dayId: string,
+  slotId: string,
+  movementId: string,
+): WorkoutState {
+  const swapped = substituteForWeek(state, weekKey, dayId, slotId, movementId);
+  const permanent = substituteSlot(swapped, dayId, slotId, movementId);
+  return clearWeekSubstitution(permanent, weekKey, dayId, slotId);
 }

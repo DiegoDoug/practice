@@ -24,6 +24,7 @@ import {
   renameDay,
   resolveSlotGroup,
   resolveSlotName,
+  setSlotUnilateral,
   slotHasHistory,
 } from '@/lib/routine';
 import type { WorkoutState } from '@/lib/types';
@@ -150,6 +151,28 @@ export function RoutineDialog({
                         {resolveSlotGroup(state.movements, slot)}
                         {hasHistory ? ' · has history' : null}
                       </p>
+                      <label className="text-ocean-deep mt-1 flex items-center gap-2 text-[12px]">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(slot.unilateral)}
+                          onChange={(event) =>
+                            onEdit(
+                              (previous) =>
+                                setSlotUnilateral(
+                                  previous,
+                                  day.dayId,
+                                  slot.slotId,
+                                  event.target.checked,
+                                ),
+                              event.target.checked
+                                ? `${name} now tracks left and right separately.`
+                                : `${name} back to a single entry per set.`,
+                            )
+                          }
+                          className="accent-ocean-blue h-5 w-5 shrink-0"
+                        />
+                        Track left and right separately
+                      </label>
                     </div>
                     <button
                       type="button"

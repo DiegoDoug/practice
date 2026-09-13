@@ -60,6 +60,13 @@ export type WorkoutWeek = {
   completion: Record<string, boolean>;
   /** Per-day routine as it stood when that day was first logged. */
   routine?: Record<string, RoutineDaySnapshot>;
+  /**
+   * One-off swaps for this week only, keyed by slotId → movementId.
+   *
+   * Kept separate from the snapshot so a later routine edit, which re-freezes
+   * open snapshots, cannot quietly undo a swap the athlete made mid-week.
+   */
+  substitutions?: Record<string, string>;
 };
 
 export type WeightUnit = 'lb' | 'kg';

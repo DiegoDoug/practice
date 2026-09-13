@@ -119,6 +119,7 @@ const v4WeekSchema = z.object({
   ),
   completion: z.record(z.string(), z.boolean()),
   routine: z.record(z.string(), snapshotSchema).optional(),
+  substitutions: z.record(z.string(), z.string()).optional(),
 });
 
 const v4Schema = z.object({
