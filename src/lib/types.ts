@@ -158,6 +158,23 @@ const sideHasAny = (side: SideEntry | undefined): boolean =>
 export const isLoggedSet = (set: SetEntry): boolean =>
   sideHasLoad(set) || sideHasLoad(set.right);
 
+const sideIsComplete = (side: SideEntry | undefined): boolean =>
+  side !== undefined &&
+  side.weight.trim() !== '' &&
+  side.reps.trim() !== '' &&
+  Number.isFinite(Number(side.weight)) &&
+  Number.isFinite(Number(side.reps));
+
+/**
+ * Stricter than `isLoggedSet`: the set is finished, not merely started. Both
+ * weight and reps must hold a real number — both sides for a unilateral set —
+ * so a half-typed row does not read as done. Drives the rest timer.
+ */
+export const isCompleteSet = (set: SetEntry, unilateral: boolean): boolean =>
+  unilateral
+    ? sideIsComplete(set) && sideIsComplete(set.right)
+    : sideIsComplete(set);
+
 /** Looser test used for history/CSV inclusion, matching the source behaviour. */
 export const hasAnyValue = (set: SetEntry): boolean =>
   sideHasAny(set) || sideHasAny(set.right);

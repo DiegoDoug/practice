@@ -1,7 +1,7 @@
 'use client';
 
 import { X } from 'lucide-react';
-import type { SetEntry, SideEntry } from '@/lib/types';
+import { isCompleteSet, type SetEntry, type SideEntry } from '@/lib/types';
 
 type Side = 'left' | 'right';
 
@@ -45,6 +45,15 @@ export function SetRow({
       ? `${exerciseName} set ${setIndex + 1} ${side} ${field}`
       : `${exerciseName} set ${setIndex + 1} ${field}`;
 
+  /**
+   * Blur is the signal a set was logged, but it fires on every field, so the
+   * rest timer starts only once the row actually holds weight and reps — both
+   * sides of a unilateral row — and never part-way through typing a number.
+   */
+  const onBlur = () => {
+    if (isCompleteSet(set, unilateral)) onSetComplete?.();
+  };
+
   /** Enter walks forward through the row; from the last field of the last row
    *  it appends a new set and focuses its weight field. */
   const onKeyDown =
@@ -81,7 +90,7 @@ export function SetRow({
         aria-label={label('weight', side)}
         value={values.weight}
         onChange={(event) => onChange('weight', event.target.value, side)}
-        onBlur={onSetComplete}
+        onBlur={onBlur}
         onKeyDown={onKeyDown(false)}
       />
       <input
@@ -95,7 +104,7 @@ export function SetRow({
         aria-label={label('reps', side)}
         value={values.reps}
         onChange={(event) => onChange('reps', event.target.value, side)}
-        onBlur={onSetComplete}
+        onBlur={onBlur}
         onKeyDown={onKeyDown(false)}
       />
       <input
@@ -110,7 +119,7 @@ export function SetRow({
         aria-label={label('RPE', side)}
         value={values.rpe}
         onChange={(event) => onChange('rpe', event.target.value, side)}
-        onBlur={onSetComplete}
+        onBlur={onBlur}
         onKeyDown={onKeyDown(isLastSide)}
       />
     </>
