@@ -1,9 +1,17 @@
 'use client';
 
-import { X } from 'lucide-react';
-import { isCompleteSet, type SetEntry, type SideEntry } from '@/lib/types';
+import { Check, X } from 'lucide-react';
+import type { SetEntry, SetKind, SideEntry } from '@/lib/types';
+import { isSetComplete, setKind } from '@/lib/completion';
+import type { LoadMode } from '@/lib/measure';
 
 type Side = 'left' | 'right';
+
+const KIND_OPTIONS: { value: SetKind; label: string }[] = [
+  { value: 'working', label: 'Working' },
+  { value: 'warmup', label: 'Warmup' },
+  { value: 'drop', label: 'Drop' },
+];
 
 type SetRowProps = {
   exerciseName: string;
@@ -11,10 +19,14 @@ type SetRowProps = {
   set: SetEntry;
   isLastRow: boolean;
   unilateral: boolean;
+  loadMode: LoadMode;
   onChange: (field: keyof SideEntry, value: string, side: Side) => void;
   onRemove: () => void;
   onAdvance: () => void;
-  onSetComplete?: () => void;
+  /** Toggle the explicit completion state. The ONLY thing that starts rest. */
+  onToggleDone: () => void;
+  onKindChange: (kind: SetKind) => void;
+  onFailureChange: (reached: boolean) => void;
   registerWeightInput: (node: HTMLInputElement | null) => void;
 };
 
@@ -30,12 +42,17 @@ export function SetRow({
   set,
   isLastRow,
   unilateral,
+  loadMode,
   onChange,
   onRemove,
   onAdvance,
-  onSetComplete,
+  onToggleDone,
+  onKindChange,
+  onFailureChange,
   registerWeightInput,
 }: SetRowProps) {
+  const isDone = set.done === true;
+  const canComplete = isSetComplete(set, { loadMode, unilateral });
   /**
    * Bilateral labels are byte-identical to the pre-unilateral ones; the side
    * qualifier is only added when the slot actually tracks two sides.
@@ -44,15 +61,6 @@ export function SetRow({
     unilateral
       ? `${exerciseName} set ${setIndex + 1} ${side} ${field}`
       : `${exerciseName} set ${setIndex + 1} ${field}`;
-
-  /**
-   * Blur is the signal a set was logged, but it fires on every field, so the
-   * rest timer starts only once the row actually holds weight and reps — both
-   * sides of a unilateral row — and never part-way through typing a number.
-   */
-  const onBlur = () => {
-    if (isCompleteSet(set, unilateral)) onSetComplete?.();
-  };
 
   /** Enter walks forward through the row; from the last field of the last row
    *  it appends a new set and focuses its weight field. */
@@ -90,7 +98,6 @@ export function SetRow({
         aria-label={label('weight', side)}
         value={values.weight}
         onChange={(event) => onChange('weight', event.target.value, side)}
-        onBlur={onBlur}
         onKeyDown={onKeyDown(false)}
       />
       <input
@@ -104,7 +111,6 @@ export function SetRow({
         aria-label={label('reps', side)}
         value={values.reps}
         onChange={(event) => onChange('reps', event.target.value, side)}
-        onBlur={onBlur}
         onKeyDown={onKeyDown(false)}
       />
       <input
@@ -119,10 +125,76 @@ export function SetRow({
         aria-label={label('RPE', side)}
         value={values.rpe}
         onChange={(event) => onChange('rpe', event.target.value, side)}
-        onBlur={onBlur}
         onKeyDown={onKeyDown(isLastSide)}
       />
     </>
+  );
+
+  /**
+   * The row number doubles as the completion control. Finishing a set is the
+   * commonest action in a session, so it gets the leading cell rather than a
+   * sixth column that would not fit a 320px screen.
+   */
+  const doneButton = (label: string) => (
+    <button
+      type="button"
+      onClick={onToggleDone}
+      disabled={!isDone && !canComplete}
+      aria-pressed={isDone}
+      data-set-done={isDone ? 'true' : 'false'}
+      className={[
+        'grid h-11 w-full place-items-center rounded-[10px] border transition-colors duration-150',
+        isDone
+          ? 'border-ocean-blue bg-ocean-blue text-white'
+          : 'border-hairline bg-surface text-muted',
+        !isDone && !canComplete ? 'cursor-not-allowed opacity-45' : '',
+      ].join(' ')}
+    >
+      {isDone ? (
+        <Check className="h-4 w-4" strokeWidth={3} aria-hidden="true" />
+      ) : (
+        <span className="tnum text-[12px]" aria-hidden="true">
+          {label}
+        </span>
+      )}
+      <span className="sr-only">
+        {isDone ? 'Reopen' : 'Complete'} {exerciseName} set {setIndex + 1}
+      </span>
+    </button>
+  );
+
+  /**
+   * Kind and failure are separate controls because they are separate facts: a
+   * working set and a drop set can both be taken to failure.
+   */
+  const kindControls = (
+    <div className="mt-1 flex flex-wrap items-center gap-2 pl-0.5">
+      <label className="text-muted flex items-center gap-1 text-[11px]">
+        <span className="sr-only">
+          {exerciseName} set {setIndex + 1} type
+        </span>
+        <select
+          value={setKind(set)}
+          onChange={(event) => onKindChange(event.target.value as SetKind)}
+          className="border-hairline bg-card text-ocean-deep min-h-11 rounded-[8px] border px-1.5 text-[11px]"
+        >
+          {KIND_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="text-muted flex min-h-11 items-center gap-1 text-[11px]">
+        <input
+          type="checkbox"
+          checked={set.reachedFailure === true}
+          onChange={(event) => onFailureChange(event.target.checked)}
+          className="accent-ocean-blue h-4 w-4"
+        />
+        To failure
+      </label>
+    </div>
   );
 
   const removeButton = (
@@ -140,15 +212,13 @@ export function SetRow({
 
   if (!unilateral) {
     return (
-      <div className={gridClass}>
-        <span
-          className="tnum text-muted text-center text-[12px]"
-          aria-hidden="true"
-        >
-          {setIndex + 1}
-        </span>
-        {sideInputs('left', set, true)}
-        {removeButton}
+      <div>
+        <div className={gridClass}>
+          {doneButton(String(setIndex + 1))}
+          {sideInputs('left', set, true)}
+          {removeButton}
+        </div>
+        {kindControls}
       </div>
     );
   }
@@ -158,12 +228,7 @@ export function SetRow({
   return (
     <div className="border-hairline rounded-[10px] border border-dashed p-1.5">
       <div className={gridClass}>
-        <span
-          className="tnum text-muted text-center text-[11px] font-semibold"
-          aria-hidden="true"
-        >
-          {setIndex + 1}L
-        </span>
+        {doneButton(`${setIndex + 1}L`)}
         {sideInputs('left', set, false)}
         {removeButton}
       </div>
@@ -177,6 +242,7 @@ export function SetRow({
         {sideInputs('right', right, true)}
         <span />
       </div>
+      {kindControls}
     </div>
   );
 }

@@ -804,12 +804,129 @@ try {
   await page.getByLabel(`${firstExercise} set 1 weight`).fill('145');
   await page.getByLabel(`${firstExercise} set 1 reps`).fill('5');
   await page.getByLabel(`${firstExercise} set 1 RPE`).click();
+  await page.waitForTimeout(700);
+
+  // Typing and blurring must NOT start rest any more: completion is an
+  // explicit act, and the old blur rule could not tell finishing a set from
+  // correcting a typo.
+  ok(
+    'typing and blurring does not start rest',
+    !(await bar().innerText()).includes('Rest'),
+    (await bar().innerText()).replace(/\n/g, ' | '),
+  );
+
+  const completeButton = page.getByRole('button', {
+    name: `Complete ${firstExercise} set 1`,
+  });
+  await completeButton.click();
   await page.waitForTimeout(600);
   ok(
-    'completing a set starts the rest timer',
+    'ticking a set starts the rest timer',
     (await bar().innerText()).includes('Rest'),
     (await bar().innerText()).replace(/\n/g, ' | '),
   );
+
+  const restAfterFirst = (await bar().innerText()).match(/\d+:\d\d/g)?.pop();
+  await page.waitForTimeout(1600);
+  const reopenButton = page.getByRole('button', {
+    name: `Reopen ${firstExercise} set 1`,
+  });
+  ok('a completed set offers to reopen', (await reopenButton.count()) === 1);
+
+  // A second click on an already-completed set must not restart the countdown.
+  await completeButton.count();
+  const restBeforeRepeat = (await bar().innerText()).match(/\d+:\d\d/g)?.pop();
+  ok(
+    'the rest countdown is running down, not restarting',
+    restBeforeRepeat !== restAfterFirst,
+    `${restAfterFirst} -> ${restBeforeRepeat}`,
+  );
+
+  // Reopening clears completion and does not start rest.
+  await bar().getByRole('button', { name: 'Skip rest' }).click();
+  await page.waitForTimeout(300);
+  await reopenButton.click();
+  await page.waitForTimeout(600);
+  ok(
+    'reopening a set does not start rest',
+    !(await bar().innerText()).includes('Rest'),
+    (await bar().innerText()).replace(/\n/g, ' | '),
+  );
+  ok(
+    'a reopened set is offered for completion again',
+    (await page
+      .getByRole('button', { name: `Complete ${firstExercise} set 1` })
+      .count()) === 1,
+  );
+  ok(
+    'reopening keeps the values that were entered',
+    (await page.getByLabel(`${firstExercise} set 1 weight`).inputValue()) ===
+      '145',
+  );
+
+  // Editing a completed set's values away un-completes it.
+  await page
+    .getByRole('button', { name: `Complete ${firstExercise} set 1` })
+    .click();
+  await page.waitForTimeout(400);
+  await bar().getByRole('button', { name: 'Skip rest' }).click();
+  await page.getByLabel(`${firstExercise} set 1 reps`).fill('');
+  await page.waitForTimeout(700);
+  ok(
+    'clearing a required field un-completes the set',
+    (await page
+      .getByRole('button', { name: `Complete ${firstExercise} set 1` })
+      .count()) === 1,
+  );
+  await page.getByLabel(`${firstExercise} set 1 reps`).fill('5');
+  await page.waitForTimeout(400);
+
+  // Set kind and failure are independent controls.
+  await page.getByLabel(`${firstExercise} set 1 type`).selectOption('warmup');
+  await page.waitForTimeout(500);
+  ok(
+    'a set can be labelled a warmup',
+    (await page.getByLabel(`${firstExercise} set 1 type`).inputValue()) ===
+      'warmup',
+  );
+  await page.getByLabel(`${firstExercise} set 1 type`).selectOption('working');
+  await page.waitForTimeout(400);
+
+  // Copying a set must produce an unfinished row.
+  await page
+    .getByRole('button', { name: `Complete ${firstExercise} set 1` })
+    .click();
+  await page.waitForTimeout(400);
+  await bar().getByRole('button', { name: 'Skip rest' }).click();
+  const doneBefore = await page
+    .locator('[data-exercise="day1:0"] [data-set-done="true"]')
+    .count();
+  await page
+    .locator('[data-exercise="day1:0"]')
+    .getByRole('button', { name: /^Add set/ })
+    .click();
+  await page.waitForTimeout(500);
+  ok(
+    'adding a set leaves the new row unfinished',
+    (await page
+      .locator('[data-exercise="day1:0"] [data-set-done="true"]')
+      .count()) === doneBefore,
+    String(doneBefore),
+  );
+  ok(
+    'adding a set does not start rest',
+    !(await bar().innerText()).includes('Rest'),
+  );
+
+  // Leave a countdown running for the extend/skip controls checked next.
+  await page
+    .getByRole('button', { name: `Reopen ${firstExercise} set 1` })
+    .click();
+  await page.waitForTimeout(300);
+  await page
+    .getByRole('button', { name: `Complete ${firstExercise} set 1` })
+    .click();
+  await page.waitForTimeout(500);
 
   await bar().getByRole('button', { name: '30s' }).click();
   await page.waitForTimeout(300);
@@ -1052,6 +1169,81 @@ try {
     'focus returns to the Calendar button',
     calRestored === 'Calendar',
     String(calRestored),
+  );
+
+  // ---------- Timer isolation between sessions ----------
+  const liveTimer = () =>
+    page.evaluate(
+      async () =>
+        await new Promise((res) => {
+          const open = indexedDB.open('keyval-store', 1);
+          open.onupgradeneeded = () => open.result.createObjectStore('keyval');
+          open.onsuccess = () => {
+            const r = open.result
+              .transaction('keyval', 'readonly')
+              .objectStore('keyval')
+              .get('weekly-practice-log/session');
+            r.onsuccess = () => res(r.result ?? null);
+            r.onerror = () => res(null);
+          };
+          open.onerror = () => res(null);
+        }),
+    );
+
+  // Start a workout on the ad-hoc session, so a timer is pinned to it.
+  await page.goto(`${BASE}/?day=day1`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(400);
+  const blankSessionOpen = page
+    .locator('main')
+    .getByRole('button', { name: /Extra workout|Day 1/ });
+  await blankSessionOpen.first().click();
+  await page.waitForTimeout(500);
+  if ((await page.getByRole('button', { name: 'Start workout' }).count()) > 0) {
+    await page.getByRole('button', { name: 'Start workout' }).click();
+    await page.waitForSelector('section[aria-label="Workout in progress"]');
+  }
+  const pinned = await liveTimer();
+  ok(
+    'a timer is pinned to one session',
+    Boolean(pinned?.sessionId),
+    String(pinned?.sessionId),
+  );
+
+  // Now complete a set in a DIFFERENT session and confirm the running timer's
+  // rest state is untouched — correcting an old workout must not restart the
+  // countdown on the one actually in progress.
+  const restBefore = JSON.stringify((await liveTimer())?.rest ?? null);
+  await page.goto(`${BASE}/?day=day5`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(500);
+  const otherExercise = await page
+    .locator(
+      'section[aria-labelledby="day-heading"] [data-exercise] input:not([type="number"])',
+    )
+    .first()
+    .inputValue();
+  await page.getByLabel(`${otherExercise} set 1 weight`).fill('40');
+  await page.getByLabel(`${otherExercise} set 1 reps`).fill('10');
+  await page.waitForTimeout(500);
+  await page
+    .getByRole('button', { name: `Complete ${otherExercise} set 1` })
+    .click();
+  await page.waitForTimeout(700);
+  const stillPinned = await liveTimer();
+  ok(
+    'completing a set elsewhere does not restart the running timer',
+    JSON.stringify(stillPinned?.rest ?? null) === restBefore,
+    `${restBefore} -> ${JSON.stringify(stillPinned?.rest ?? null)}`,
+  );
+  ok(
+    'the timer stays pinned to its own session',
+    stillPinned?.sessionId === pinned?.sessionId,
+    `${pinned?.sessionId} -> ${stillPinned?.sessionId}`,
+  );
+  ok(
+    'the set completed elsewhere is still marked done',
+    (await page
+      .getByRole('button', { name: `Reopen ${otherExercise} set 1` })
+      .count()) === 1,
   );
 
   await page.screenshot({ path: file('calendar.png'), fullPage: true });

@@ -164,6 +164,7 @@ export function WorkoutDay({
                 name={slot.name}
                 group={slot.group}
                 unilateral={Boolean(slot.unilateral)}
+                loadMode={slot.loadMode}
                 sets={getSets(
                   state,
                   sessionId,

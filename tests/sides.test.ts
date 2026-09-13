@@ -34,8 +34,10 @@ const both = (
 
 describe('blankSet', () => {
   it('is one-sided by default', () => {
-    expect(blankSet()).toEqual({ weight: '', reps: '', rpe: '' });
+    expect(blankSet()).toMatchObject({ weight: '', reps: '', rpe: '' });
     expect(blankSet().right).toBeUndefined();
+    // Every row carries an id now; circuit progress and records key off it.
+    expect(blankSet().setId).toBeTruthy();
   });
 
   it('carries an empty right side when unilateral', () => {

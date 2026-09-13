@@ -3,7 +3,14 @@
 import { useCallback, useRef, useState } from 'react';
 import { Plus, Repeat, RotateCcw } from 'lucide-react';
 import { SetRow } from './set-row';
-import { blankSet, type SetEntry, type SideEntry } from '@/lib/types';
+import {
+  blankSet,
+  type SetEntry,
+  type SetKind,
+  type SideEntry,
+} from '@/lib/types';
+import { markDone, reopen, setReachedFailure, setSetKind } from '@/lib/sets';
+import type { LoadMode } from '@/lib/measure';
 import {
   formatSetSummary,
   removeSet,
@@ -21,12 +28,14 @@ type ExerciseCardProps = {
   name: string;
   group: string;
   unilateral: boolean;
+  loadMode: LoadMode;
   sets: SetEntry[];
   prior: PriorPerformance | null;
   /** Set when the prior performance was logged under a different movement. */
   priorNote?: string;
   onSetsChange: (sets: SetEntry[]) => void;
   onRename: (name: string) => void;
+  /** Called only when a set actually transitions into completed. */
   onSetComplete?: () => void;
   onSubstitute?: () => void;
   /** Set when this slot is swapped for this week only. */
@@ -41,6 +50,7 @@ export function ExerciseCard({
   name,
   group,
   unilateral,
+  loadMode,
   sets,
   prior,
   priorNote,
@@ -65,6 +75,31 @@ export function ExerciseCard({
     onSetsChange([...sets, blankSet(unilateral)]);
     focusLastWeight();
   }, [focusLastWeight, onSetsChange, sets, unilateral]);
+
+  /**
+   * Completion is the one action that starts rest, and only on the
+   * unfinished → completed edge. `markDone` returns the same array when
+   * nothing changed, so a second click on an already-ticked set cannot
+   * restart a countdown that is already running.
+   */
+  const onToggleDone = useCallback(
+    (setIndex: number) => {
+      if (sets[setIndex]?.done) {
+        onSetsChange(reopen(sets, setIndex));
+        return;
+      }
+      const next = markDone(
+        sets,
+        setIndex,
+        { loadMode, unilateral },
+        Date.now(),
+      );
+      if (next === sets) return;
+      onSetsChange(next);
+      onSetComplete?.();
+    },
+    [loadMode, onSetComplete, onSetsChange, sets, unilateral],
+  );
 
   const onRepeatLast = useCallback(() => {
     onSetsChange(repeatLast(sets, prior));
@@ -153,7 +188,7 @@ export function ExerciseCard({
       <div className="flex max-w-[520px] flex-col gap-1.5">
         {sets.map((set, setIndex) => (
           <SetRow
-            key={setIndex}
+            key={set.setId ?? setIndex}
             exerciseName={name}
             setIndex={setIndex}
             set={set}
@@ -162,15 +197,27 @@ export function ExerciseCard({
             registerWeightInput={(node) => {
               weightInputs.current[setIndex] = node;
             }}
+            loadMode={loadMode}
             onChange={(field: keyof SideEntry, value, side) =>
-              onSetsChange(updateSet(sets, setIndex, field, value, side))
+              onSetsChange(
+                updateSet(sets, setIndex, field, value, side, {
+                  loadMode,
+                  unilateral,
+                }),
+              )
             }
             onRemove={() => {
               weightInputs.current = [];
               onSetsChange(removeSet(sets, setIndex, unilateral));
             }}
             onAdvance={addSet}
-            onSetComplete={onSetComplete}
+            onToggleDone={() => onToggleDone(setIndex)}
+            onKindChange={(kind: SetKind) =>
+              onSetsChange(setSetKind(sets, setIndex, kind))
+            }
+            onFailureChange={(reached: boolean) =>
+              onSetsChange(setReachedFailure(sets, setIndex, reached))
+            }
           />
         ))}
       </div>

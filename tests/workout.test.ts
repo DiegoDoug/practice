@@ -177,7 +177,10 @@ describe('repeatLast', () => {
     expect(next).toHaveLength(3);
     expect(next[0]).toEqual(current[0]);
     expect(next[1]).toEqual(current[1]);
-    expect(next[2]).toEqual({ weight: '125', reps: '8', rpe: '7' });
+    expect(next[2]).toMatchObject({ weight: '125', reps: '8', rpe: '7' });
+    // The copy is a new, unfinished row of its own.
+    expect(next[2].setId).toBeTruthy();
+    expect(next[2].done).toBeUndefined();
   });
 
   it('copies the value rather than sharing the prior object', () => {
@@ -210,7 +213,7 @@ describe('repeatLast', () => {
       ...prior,
       sets: [set('', '', '8'), set('140', '5', '9')],
     });
-    expect(next[1]).toEqual(set('140', '5', '9'));
+    expect(next[1]).toMatchObject(set('140', '5', '9'));
   });
 
   it('is a no-op when there is no prior performance', () => {
@@ -229,11 +232,11 @@ describe('repeatLast', () => {
 
 describe('set row editing', () => {
   it('keeps one empty row when the final row is removed', () => {
-    expect(removeSet([set('135', '8')], 0)).toEqual([set('', '')]);
+    expect(removeSet([set('135', '8')], 0)).toMatchObject([set('', '')]);
   });
 
   it('keeps a two-sided empty row for a unilateral slot', () => {
-    expect(removeSet([set('135', '8')], 0, true)).toEqual([
+    expect(removeSet([set('135', '8')], 0, true)).toMatchObject([
       {
         weight: '',
         reps: '',
@@ -265,7 +268,7 @@ describe('set row editing', () => {
   });
 
   it('returns a single empty row for a slot with no data', () => {
-    expect(getSets(emptyState(), 'no-such-session', 'day1-s0')).toEqual([
+    expect(getSets(emptyState(), 'no-such-session', 'day1-s0')).toMatchObject([
       set('', ''),
     ]);
   });

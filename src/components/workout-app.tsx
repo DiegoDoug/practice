@@ -343,14 +343,21 @@ export function WorkoutApp() {
   );
 
   /**
-   * Start the rest countdown for a set the athlete just finished logging.
-   * SetRow decides when a row counts as logged; this only adds the condition
-   * that a live, unpaused session is running.
+   * Start the rest countdown for a set the athlete just ticked.
+   *
+   * The card fires this only on the unfinished → completed edge. The extra
+   * conditions here are that a live, unpaused timer is running AND that it
+   * belongs to the session being logged into — completing a set in some other
+   * session, a past workout being corrected, say, must not restart the timer
+   * on the one actually in progress.
    */
   const onSetComplete = useCallback(() => {
     if (!live.session || isPaused(live.session)) return;
+    if (!activeSession || live.session.sessionId !== activeSession.sessionId) {
+      return;
+    }
     live.startRest();
-  }, [live]);
+  }, [activeSession, live]);
 
   const onStartWorkout = useCallback(() => {
     if (!activeSession && !activeDay) return;
