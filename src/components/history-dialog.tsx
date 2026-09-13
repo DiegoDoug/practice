@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import { Check } from 'lucide-react';
 import { Dialog } from './dialog';
+import { SideComparison } from './side-comparison';
 import { buildHistory } from '@/lib/workout';
 import { formatVolume } from '@/lib/volume';
 import { formatWeekLabel } from '@/lib/week';
@@ -16,8 +17,11 @@ type HistoryDialogProps = {
   state: WorkoutState;
 };
 
+type Tab = 'sessions' | 'sides';
+
 export function HistoryDialog({ open, onClose, state }: HistoryDialogProps) {
   const [visible, setVisible] = useState(PAGE_SIZE);
+  const [tab, setTab] = useState<Tab>('sessions');
   const entries = useMemo(() => buildHistory(state), [state]);
   const shown = entries.slice(0, visible);
 
@@ -28,7 +32,38 @@ export function HistoryDialog({ open, onClose, state }: HistoryDialogProps) {
       title="Workout history"
       description="Sessions with logged sets, newest first. Volume counts weight × reps for every set where both are numbers."
     >
-      {shown.length === 0 ? (
+      <div
+        role="tablist"
+        aria-label="History view"
+        className="border-hairline mb-3 flex gap-1 border-b"
+      >
+        {(
+          [
+            ['sessions', 'Sessions'],
+            ['sides', 'Left vs right'],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={tab === id}
+            onClick={() => setTab(id)}
+            className={[
+              'min-h-11 rounded-t-[10px] px-3 text-[13px] font-semibold transition-colors duration-150',
+              tab === id
+                ? 'border-ocean-blue text-ocean-deep border-b-2'
+                : 'text-muted hover:text-ocean-deep',
+            ].join(' ')}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'sides' ? (
+        <SideComparison state={state} />
+      ) : shown.length === 0 ? (
         <p className="text-muted py-2 text-[13px]">
           Nothing logged yet. Enter a weight or reps on any exercise and it will
           appear here.

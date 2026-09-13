@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Archive, FileDown, History, ListChecks } from 'lucide-react';
+import { Archive, FileDown, History, ListChecks, Play } from 'lucide-react';
 import { AppSkeleton } from './app-skeleton';
 import { BackupDialog } from './backup-dialog';
 import { DayTabs } from './day-tabs';
@@ -12,6 +12,9 @@ import { MovementPicker } from './movement-picker';
 import { SubstituteDialog, type SubstituteTarget } from './substitute-dialog';
 import { Dialog } from './dialog';
 import { SafeModeNotice } from './safe-mode-notice';
+import { LiveSessionBar } from './live-session-bar';
+import { useLiveSession } from '@/lib/use-live-session';
+import { isPaused } from '@/lib/live-session';
 import { WeeklyOverview } from './weekly-overview';
 import { WorkoutDay } from './workout-day';
 import { buildWeekCsv, countCsvDataRows, weekCsvFilename } from '@/lib/csv';
@@ -48,6 +51,7 @@ export function WorkoutApp() {
   const params = useSearchParams();
   const { state, hydrated, status, safeMode, update, replace, flush } =
     useWorkoutStore();
+  const live = useLiveSession();
 
   // Resolved lazily on first render. The page renders the skeleton until the
   // store has hydrated, so this never reaches the server-rendered HTML and can
@@ -187,6 +191,35 @@ export function WorkoutApp() {
     },
     [addingToDay, onRoutineEdit, state.movements],
   );
+
+  /**
+   * Called when a set input loses focus. The rest timer starts only once the
+   * row actually holds weight and reps, so it never fires part-way through
+   * typing a number.
+   */
+  const onSetComplete = useCallback(() => {
+    if (!live.session || isPaused(live.session)) return;
+    live.startRest();
+  }, [live]);
+
+  const onStartWorkout = useCallback(() => {
+    if (!activeDay) return;
+    live.start(weekKey, activeDay);
+    setAnnouncement('Workout started.');
+  }, [activeDay, live, weekKey]);
+
+  const onFinishWorkout = useCallback(() => {
+    const session = live.session;
+    live.finish();
+    if (session) {
+      // Finishing writes to the week the session began in, not whatever week
+      // it happens to be when the athlete taps the button.
+      update((previous) =>
+        withCompletion(previous, session.weekKey, session.dayId, true),
+      );
+    }
+    setAnnouncement('Workout finished and marked complete.');
+  }, [live, update]);
 
   const onOpenSubstitute = useCallback(
     (slotId: string) => {
@@ -335,6 +368,20 @@ export function WorkoutApp() {
       />
 
       <main>
+        {live.session && live.session.dayId === activeDay ? (
+          <LiveSessionBar
+            session={live.session}
+            dayTitle={
+              day?.name ? `${day.label} — ${day.name}` : (day?.label ?? '')
+            }
+            onPause={live.pause}
+            onResume={live.resume}
+            onFinish={onFinishWorkout}
+            onSkipRest={live.skipRest}
+            onExtendRest={live.extendRest}
+          />
+        ) : null}
+
         {day && activeDay ? (
           <WorkoutDay
             day={day}
@@ -346,6 +393,7 @@ export function WorkoutApp() {
             onRename={onRename}
             onSubstitute={onOpenSubstitute}
             onUndoSubstitute={onUndoSubstitute}
+            onSetComplete={onSetComplete}
           />
         ) : (
           <section className="rounded-card border-hairline bg-card border p-6 text-center">
@@ -370,6 +418,16 @@ export function WorkoutApp() {
             {SAVE_LABEL[status]}
           </p>
           <div className="flex flex-wrap gap-2">
+            {day && activeDay && !live.session ? (
+              <button
+                type="button"
+                onClick={onStartWorkout}
+                className="rounded-control bg-ocean-blue hover:bg-ocean-deep inline-flex min-h-11 items-center gap-1.5 px-3 text-[13px] font-semibold text-white transition-colors duration-150"
+              >
+                <Play className="h-4 w-4" aria-hidden="true" />
+                Start workout
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={onExportCsv}
