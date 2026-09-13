@@ -2,18 +2,32 @@
 
 import { Check, Flame } from 'lucide-react';
 import { ExerciseCard } from './exercise-card';
-import type { RoutineDay, SetEntry, WorkoutState } from '@/lib/types';
+import type {
+  RoutineDay,
+  SetEntry,
+  WorkoutSession,
+  WorkoutState,
+} from '@/lib/types';
 import {
   countLoggedExercises,
   findPriorPerformance,
   getSets,
 } from '@/lib/workout';
-import { resolveWeekRoutine } from '@/lib/routine';
+import { resolveSessionRoutine } from '@/lib/routine';
+
+/** Stand-in used only to resolve the routine before a session exists. */
+const blankSession: WorkoutSession = {
+  sessionId: '',
+  routineDayId: null,
+  status: 'scheduled',
+  exercises: {},
+};
 
 type WorkoutDayProps = {
   day: RoutineDay;
   state: WorkoutState;
-  weekKey: string;
+  /** Null until the athlete logs something, which is what creates a session. */
+  session: WorkoutSession | null;
   completed: boolean;
   onToggleComplete: () => void;
   onSetsChange: (slotId: string, sets: SetEntry[]) => void;
@@ -26,7 +40,7 @@ type WorkoutDayProps = {
 export function WorkoutDay({
   day,
   state,
-  weekKey,
+  session,
   completed,
   onToggleComplete,
   onSetsChange,
@@ -35,12 +49,17 @@ export function WorkoutDay({
   onSubstitute,
   onUndoSubstitute,
 }: WorkoutDayProps) {
-  // Render through the resolved routine so an in-progress week shows the plan
-  // it was logged under rather than one edited midway.
-  const resolved = resolveWeekRoutine(state, weekKey, day.dayId);
-  const substitutions = state.weeks[weekKey]?.substitutions ?? {};
+  // Render through the resolved routine so an in-progress session shows the
+  // plan it was logged under rather than one edited midway. With no session
+  // yet, that resolves to the current routine day.
+  const resolved = resolveSessionRoutine(
+    state,
+    session ?? { ...blankSession, routineDayId: day.dayId },
+  );
+  const sessionId = session?.sessionId ?? '';
+  const substitutions = session?.substitutions ?? {};
   const total = resolved.exercises.length;
-  const logged = countLoggedExercises(state, weekKey, day.dayId);
+  const logged = session ? countLoggedExercises(state, sessionId) : 0;
   const percent = total === 0 ? 0 : Math.min(100, (logged / total) * 100);
 
   return (
@@ -121,7 +140,9 @@ export function WorkoutDay({
           {resolved.exercises.map((slot, index) => {
             const prior = findPriorPerformance(
               state,
-              weekKey,
+              // With no session yet, nothing has been logged for this exercise
+              // today, so everything already logged counts as prior.
+              session ? { sessionId } : {},
               slot.movementId,
               day.dayId,
               slot.slotId,
@@ -139,8 +160,7 @@ export function WorkoutDay({
                 unilateral={Boolean(slot.unilateral)}
                 sets={getSets(
                   state,
-                  weekKey,
-                  day.dayId,
+                  sessionId,
                   slot.slotId,
                   Boolean(slot.unilateral),
                 )}

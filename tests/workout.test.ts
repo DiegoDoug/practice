@@ -9,7 +9,6 @@ import {
   removeSet,
   repeatLast,
   updateSet,
-  withCompletion,
   withSets,
 } from '@/lib/workout';
 import {
@@ -18,10 +17,18 @@ import {
   removeDay,
   renameDay,
   renameSlot,
+  resolveSessionRoutine,
   resolveSlotName,
-  resolveWeekRoutine,
   seedRoutine,
 } from '@/lib/routine';
+import {
+  completeDay,
+  completionOf,
+  logDay,
+  logsFor,
+  sessionFor,
+  sessionIdFor,
+} from './helpers/sessions';
 import { PROGRAM } from '@/lib/program';
 import type { SetEntry, WorkoutState } from '@/lib/types';
 
@@ -31,29 +38,20 @@ const set = (weight: string, reps: string, rpe = ''): SetEntry => ({
   rpe,
 });
 
+/**
+ * Anchor "prior" at a week: its session when one exists, otherwise the date.
+ * Both are honest — a date is all you have before anything is logged.
+ */
+const anchorAt = (state: WorkoutState, weekKey: string) => {
+  const sessionId = sessionIdFor(state, weekKey, 'day1');
+  return sessionId ? { sessionId } : { date: weekKey };
+};
+
 const BENCH = 'barbell-bench-press';
 const ROW = 'barbell-row';
 
 /** Log a slot using the movement its seeded routine slot points at. */
-const log = (
-  state: WorkoutState,
-  weekKey: string,
-  dayId: string,
-  slotId: string,
-  sets: SetEntry[],
-): WorkoutState => {
-  const slot = findDay(state.routine, dayId)?.exercises.find(
-    (s) => s.slotId === slotId,
-  );
-  return withSets(
-    state,
-    weekKey,
-    dayId,
-    slotId,
-    sets,
-    slot?.movementId ?? 'unknown',
-  );
-};
+const log = logDay;
 
 const seeded = (): WorkoutState => {
   let state = emptyState();
@@ -69,8 +67,12 @@ describe('findPriorPerformance', () => {
   it('finds the most recent earlier week with data', () => {
     let state = seeded();
     state = log(state, '2026-08-24', 'day1', 'day1-s0', [set('115', '8')]);
-    const prior = findPriorPerformance(state, '2026-09-07', BENCH);
-    expect(prior?.weekKey).toBe('2026-08-31');
+    const prior = findPriorPerformance(
+      state,
+      anchorAt(state, '2026-09-07'),
+      BENCH,
+    );
+    expect(prior?.date).toBe('2026-08-31');
     expect(prior?.sets).toHaveLength(2);
   });
 
@@ -78,7 +80,9 @@ describe('findPriorPerformance', () => {
     let state = emptyState();
     state = log(state, '2026-09-07', 'day1', 'day1-s0', [set('225', '5')]);
     state = log(state, '2026-09-14', 'day1', 'day1-s0', [set('235', '5')]);
-    expect(findPriorPerformance(state, '2026-09-07', BENCH)).toBeNull();
+    expect(
+      findPriorPerformance(state, anchorAt(state, '2026-09-07'), BENCH),
+    ).toBeNull();
   });
 
   it('skips weeks where the movement has only empty rows', () => {
@@ -88,9 +92,9 @@ describe('findPriorPerformance', () => {
       set('', ''),
       set('', ''),
     ]);
-    expect(findPriorPerformance(state, '2026-09-07', BENCH)?.weekKey).toBe(
-      '2026-08-24',
-    );
+    expect(
+      findPriorPerformance(state, anchorAt(state, '2026-09-07'), BENCH)?.date,
+    ).toBe('2026-08-24');
   });
 
   it('finds the movement in a different day and slot', () => {
@@ -98,8 +102,13 @@ describe('findPriorPerformance', () => {
     let state = emptyState();
     state = log(state, '2026-08-31', 'day2', 'day2-s2', [set('185', '8')]);
 
-    const prior = findPriorPerformance(state, '2026-09-07', ROW, 'day6');
-    expect(prior?.weekKey).toBe('2026-08-31');
+    const prior = findPriorPerformance(
+      state,
+      anchorAt(state, '2026-09-07'),
+      ROW,
+      'day6',
+    );
+    expect(prior?.date).toBe('2026-08-31');
     expect(prior?.dayId).toBe('day2');
     expect(prior?.sets[0].weight).toBe('185');
   });
@@ -110,10 +119,22 @@ describe('findPriorPerformance', () => {
     state = log(state, '2026-08-31', 'day6', 'day6-s3', [set('195', '8')]);
 
     expect(
-      findPriorPerformance(state, '2026-09-07', ROW, 'day6', 'day6-s3')?.dayId,
+      findPriorPerformance(
+        state,
+        anchorAt(state, '2026-09-07'),
+        ROW,
+        'day6',
+        'day6-s3',
+      )?.dayId,
     ).toBe('day6');
     expect(
-      findPriorPerformance(state, '2026-09-07', ROW, 'day2', 'day2-s2')?.dayId,
+      findPriorPerformance(
+        state,
+        anchorAt(state, '2026-09-07'),
+        ROW,
+        'day2',
+        'day2-s2',
+      )?.dayId,
     ).toBe('day2');
   });
 
@@ -122,19 +143,26 @@ describe('findPriorPerformance', () => {
     state = log(state, '2026-08-31', 'day1', 'day1-s0', [set('225', '5')]);
     // Nothing has ever been logged for this other movement.
     expect(
-      findPriorPerformance(state, '2026-09-07', 'flat-db-press'),
+      findPriorPerformance(
+        state,
+        anchorAt(state, '2026-09-07'),
+        'flat-db-press',
+      ),
     ).toBeNull();
-    expect(findPriorPerformance(state, '2026-09-07', BENCH)).not.toBeNull();
+    expect(
+      findPriorPerformance(state, anchorAt(state, '2026-09-07'), BENCH),
+    ).not.toBeNull();
   });
 
   it('returns null for an empty movement id', () => {
-    expect(findPriorPerformance(seeded(), '2026-09-07', '')).toBeNull();
+    expect(findPriorPerformance(seeded(), {}, '')).toBeNull();
   });
 });
 
 describe('repeatLast', () => {
   const prior = {
-    weekKey: '2026-08-31',
+    sessionId: 'anchor',
+    date: '2026-08-31',
     dayId: 'day1',
     slotId: 'day1-s0',
     movementId: BENCH,
@@ -237,7 +265,7 @@ describe('set row editing', () => {
   });
 
   it('returns a single empty row for a slot with no data', () => {
-    expect(getSets(emptyState(), '2026-09-07', 'day1', 'day1-s0')).toEqual([
+    expect(getSets(emptyState(), 'no-such-session', 'day1-s0')).toEqual([
       set('', ''),
     ]);
   });
@@ -249,27 +277,29 @@ describe('state updates', () => {
       set('135', '8'),
     ]);
     state = log(state, '2026-09-07', 'day1', 'day1-s1', [set('50', '12')]);
-    expect(getSets(state, '2026-09-07', 'day1', 'day1-s0')).toEqual([
-      set('135', '8'),
-    ]);
-    expect(getSets(state, '2026-09-07', 'day1', 'day1-s1')).toEqual([
-      set('50', '12'),
-    ]);
+    expect(
+      getSets(state, sessionIdFor(state, '2026-09-07', 'day1'), 'day1-s0'),
+    ).toEqual([set('135', '8')]);
+    expect(
+      getSets(state, sessionIdFor(state, '2026-09-07', 'day1'), 'day1-s1'),
+    ).toEqual([set('50', '12')]);
   });
 
   it('records the movement performed alongside the sets', () => {
     const state = log(emptyState(), '2026-09-07', 'day1', 'day1-s0', [
       set('135', '8'),
     ]);
-    expect(
-      state.weeks['2026-09-07'].days.day1.exercises['day1-s0'].movementId,
-    ).toBe(BENCH);
+    expect(logsFor(state, '2026-09-07', 'day1')['day1-s0'].movementId).toBe(
+      BENCH,
+    );
   });
 
   it('tracks completion independently of logged data', () => {
-    const state = withCompletion(emptyState(), '2026-09-07', 'day3', true);
-    expect(state.weeks['2026-09-07'].completion.day3).toBe(true);
-    expect(countLoggedExercises(state, '2026-09-07', 'day3')).toBe(0);
+    const state = completeDay(emptyState(), '2026-09-07', 'day3');
+    expect(completionOf(state, '2026-09-07').day3).toBe(true);
+    expect(
+      countLoggedExercises(state, sessionIdFor(state, '2026-09-07', 'day3')),
+    ).toBe(0);
   });
 
   it('counts only slots with weight or reps toward progress', () => {
@@ -278,7 +308,9 @@ describe('state updates', () => {
     ]);
     state = log(state, '2026-09-07', 'day1', 'day1-s1', [set('', '', '8')]);
     state = log(state, '2026-09-07', 'day1', 'day1-s2', [set('', '5')]);
-    expect(countLoggedExercises(state, '2026-09-07', 'day1')).toBe(2);
+    expect(
+      countLoggedExercises(state, sessionIdFor(state, '2026-09-07', 'day1')),
+    ).toBe(2);
   });
 
   it('never counts an orphaned log toward progress', () => {
@@ -288,13 +320,14 @@ describe('state updates', () => {
     ]);
     state = withSets(
       state,
-      '2026-09-07',
-      'day1',
+      sessionIdFor(state, '2026-09-07', 'day1'),
       'day1-legacy99',
       [set('99', '9')],
       'unknown',
     );
-    expect(countLoggedExercises(state, '2026-09-07', 'day1')).toBe(1);
+    expect(
+      countLoggedExercises(state, sessionIdFor(state, '2026-09-07', 'day1')),
+    ).toBe(1);
   });
 
   it('stores a name override and clears it when reset to the movement name', () => {
@@ -322,11 +355,19 @@ describe('routine snapshots', () => {
     state = renameDay(state, 'day1', { name: 'Chest, Shoulders & Triceps' });
 
     // The past week keeps the name it was logged under...
-    expect(resolveWeekRoutine(state, '2026-08-31', 'day1').name).toBe('Push');
-    // ...while an untouched week reflects the current routine.
-    expect(resolveWeekRoutine(state, '2026-09-07', 'day1').name).toBe(
-      'Chest, Shoulders & Triceps',
-    );
+    expect(
+      resolveSessionRoutine(state, sessionFor(state, '2026-08-31', 'day1'))
+        .name,
+    ).toBe('Push');
+    // ...while a session that has not been frozen reflects the current routine.
+    expect(
+      resolveSessionRoutine(state, {
+        sessionId: 'fresh',
+        routineDayId: 'day1',
+        status: 'scheduled',
+        exercises: {},
+      }).name,
+    ).toBe('Chest, Shoulders & Triceps');
   });
 
   it('reports the old name in history after a rename', () => {
@@ -341,7 +382,7 @@ describe('routine snapshots', () => {
 describe('buildHistory', () => {
   it('summarises sessions newest first with sets, volume and completion', () => {
     let state = seeded();
-    state = withCompletion(state, '2026-08-31', 'day1', true);
+    state = completeDay(state, '2026-08-31', 'day1');
     state = log(state, '2026-09-07', 'day2', 'day2-s0', [set('100', '10')]);
 
     const history = buildHistory(state);
@@ -375,7 +416,7 @@ describe('buildHistory', () => {
   });
 
   it('omits sessions with no logged rows', () => {
-    const state = withCompletion(emptyState(), '2026-09-07', 'day1', true);
+    const state = completeDay(emptyState(), '2026-09-07', 'day1');
     expect(buildHistory(state)).toEqual([]);
   });
 });

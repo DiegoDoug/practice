@@ -8,7 +8,7 @@ import {
   dayHasHistory,
   duplicateDay,
   duplicateExercise,
-  ensureDaySnapshot,
+  ensureSessionSnapshot,
   findDay,
   moveDay,
   moveExercise,
@@ -18,15 +18,22 @@ import {
   removeExercise,
   renameDay,
   resolveSlotGroup,
-  resolveWeekRoutine,
+  resolveSessionRoutine,
   restoreDay,
   seedRoutine,
   setSlotUnilateral,
   slotHasHistory,
   substituteSlot,
 } from '@/lib/routine';
-import { withCompletion, withSets } from '@/lib/workout';
+import { withSets } from '@/lib/workout';
+import { ensureWeekDaySession } from '@/lib/sessions';
 import { PROGRAM } from '@/lib/program';
+import {
+  completeDay,
+  logsFor,
+  sessionFor,
+  sessionIdFor,
+} from './helpers/sessions';
 import type { WorkoutState } from '@/lib/types';
 
 const set = (weight: string, reps: string) => ({ weight, reps, rpe: '' });
@@ -37,8 +44,28 @@ const logged = (
   dayId: string,
   slotId: string,
   movementId = 'barbell-bench-press',
-): WorkoutState =>
-  withSets(state, weekKey, dayId, slotId, [set('135', '8')], movementId);
+): WorkoutState => {
+  const { state: next, sessionId } = ensureWeekDaySession(
+    state,
+    weekKey,
+    dayId,
+    weekKey,
+  );
+  return withSets(next, sessionId, slotId, [set('135', '8')], movementId);
+};
+
+/** The frozen snapshot for a (week, day), which is now a session's snapshot. */
+const snapshotOf = (state: WorkoutState, weekKey: string, dayId: string) =>
+  sessionFor(state, weekKey, dayId)?.snapshot;
+
+/** Re-freeze every session in a week, the old whole-week refresh. */
+const refreshWeek = (state: WorkoutState, weekKey: string): WorkoutState =>
+  refreshOpenSnapshots(
+    state,
+    Object.values(state.sessions)
+      .filter((session) => session.legacyWeekKey === weekKey || true)
+      .map((session) => session.sessionId),
+  );
 
 describe('seedRoutine', () => {
   it('mirrors the seeded program', () => {
@@ -138,9 +165,7 @@ describe('day edits', () => {
     expect(day?.archived).toBe(true);
     expect(activeDays(state).map((d) => d.dayId)).not.toContain('day1');
     // The logs are still there.
-    expect(
-      state.weeks['2026-09-07'].days.day1.exercises['day1-s0'],
-    ).toBeDefined();
+    expect(logsFor(state, '2026-09-07', 'day1')['day1-s0']).toBeDefined();
   });
 
   it('restores an archived day', () => {
@@ -187,9 +212,7 @@ describe('exercise edits', () => {
     expect(
       findDay(state.routine, 'day1')!.exercises.map((s) => s.slotId),
     ).not.toContain('day1-s0');
-    expect(
-      state.weeks['2026-09-07'].days.day1.exercises['day1-s0'],
-    ).toBeDefined();
+    expect(logsFor(state, '2026-09-07', 'day1')['day1-s0']).toBeDefined();
   });
 
   it('substitutes a slot and drops the stale overrides', () => {
@@ -233,66 +256,89 @@ describe('history probes', () => {
 
 describe('snapshots', () => {
   it('freezes on first write and is idempotent', () => {
-    let state = ensureDaySnapshot(emptyState(), '2026-09-07', 'day1');
-    const first = state.weeks['2026-09-07'].routine!.day1;
+    const created = ensureWeekDaySession(
+      emptyState(),
+      '2026-09-07',
+      'day1',
+      '2026-09-07',
+    );
+    let state = ensureSessionSnapshot(created.state, created.sessionId);
+    const first = snapshotOf(state, '2026-09-07', 'day1');
 
     state = renameDay(state, 'day1', { name: 'Renamed' });
-    state = ensureDaySnapshot(state, '2026-09-07', 'day1');
+    state = ensureSessionSnapshot(
+      state,
+      sessionIdFor(state, '2026-09-07', 'day1'),
+    );
     // A second ensure must not overwrite the frozen copy.
-    expect(state.weeks['2026-09-07'].routine!.day1).toEqual(first);
-    expect(state.weeks['2026-09-07'].routine!.day1.name).toBe('Push');
+    expect(snapshotOf(state, '2026-09-07', 'day1')).toEqual(first);
+    expect(snapshotOf(state, '2026-09-07', 'day1')!.name).toBe('Push');
   });
 
   it('is written automatically by withSets', () => {
     const state = logged(emptyState(), '2026-09-07', 'day1', 'day1-s0');
-    expect(state.weeks['2026-09-07'].routine?.day1.name).toBe('Push');
+    expect(snapshotOf(state, '2026-09-07', 'day1')?.name).toBe('Push');
   });
 
   it('is written automatically by withCompletion', () => {
-    const state = withCompletion(emptyState(), '2026-09-07', 'day2', true);
-    expect(state.weeks['2026-09-07'].routine?.day2.name).toBe('Pull');
+    const state = completeDay(emptyState(), '2026-09-07', 'day2');
+    expect(snapshotOf(state, '2026-09-07', 'day2')?.name).toBe('Pull');
   });
 
   it('refreshes an incomplete day in the current week', () => {
     let state = logged(emptyState(), '2026-09-07', 'day1', 'day1-s0');
     state = renameDay(state, 'day1', { name: 'Renamed' });
-    state = refreshOpenSnapshots(state, '2026-09-07');
-    expect(state.weeks['2026-09-07'].routine!.day1.name).toBe('Renamed');
+    state = refreshWeek(state, '2026-09-07');
+    expect(snapshotOf(state, '2026-09-07', 'day1')!.name).toBe('Renamed');
   });
 
   it('leaves a completed day alone', () => {
     let state = logged(emptyState(), '2026-09-07', 'day1', 'day1-s0');
-    state = withCompletion(state, '2026-09-07', 'day1', true);
+    state = completeDay(state, '2026-09-07', 'day1');
     state = renameDay(state, 'day1', { name: 'Renamed' });
-    state = refreshOpenSnapshots(state, '2026-09-07');
-    expect(state.weeks['2026-09-07'].routine!.day1.name).toBe('Push');
+    state = refreshWeek(state, '2026-09-07');
+    expect(snapshotOf(state, '2026-09-07', 'day1')!.name).toBe('Push');
   });
 
-  it('leaves past weeks alone', () => {
+  it('leaves sessions outside the refreshed set alone', () => {
     let state = logged(emptyState(), '2026-08-31', 'day1', 'day1-s0');
     state = renameDay(state, 'day1', { name: 'Renamed' });
-    state = refreshOpenSnapshots(state, '2026-09-07');
-    expect(state.weeks['2026-08-31'].routine!.day1.name).toBe('Push');
+    // Refreshing a different week's sessions must not touch this one.
+    state = refreshOpenSnapshots(state, []);
+    expect(snapshotOf(state, '2026-08-31', 'day1')!.name).toBe('Push');
   });
 });
 
-describe('resolveWeekRoutine', () => {
+describe('resolveSessionRoutine', () => {
+  const unfrozen = (routineDayId: string | null) => ({
+    sessionId: 'fresh',
+    routineDayId,
+    status: 'scheduled' as const,
+    exercises: {},
+  });
+
   it('returns the frozen snapshot when one exists', () => {
     let state = logged(emptyState(), '2026-08-31', 'day1', 'day1-s0');
     state = renameDay(state, 'day1', { name: 'Renamed' });
-    expect(resolveWeekRoutine(state, '2026-08-31', 'day1').name).toBe('Push');
+    expect(
+      resolveSessionRoutine(state, sessionFor(state, '2026-08-31', 'day1'))
+        .name,
+    ).toBe('Push');
   });
 
-  it('falls back to the current routine for an unlogged week', () => {
+  it('falls back to the current routine for a session not yet frozen', () => {
     const state = renameDay(emptyState(), 'day1', { name: 'Renamed' });
-    expect(resolveWeekRoutine(state, '2026-09-07', 'day1').name).toBe(
-      'Renamed',
-    );
+    expect(resolveSessionRoutine(state, unfrozen('day1')).name).toBe('Renamed');
   });
 
   it('degrades safely for a day that no longer exists at all', () => {
-    const resolved = resolveWeekRoutine(emptyState(), '2026-09-07', 'ghost');
+    const resolved = resolveSessionRoutine(emptyState(), unfrozen('ghost'));
     expect(resolved.label).toBe('ghost');
+    expect(resolved.exercises).toEqual([]);
+  });
+
+  it('degrades safely for an ad-hoc session with no routine day', () => {
+    const resolved = resolveSessionRoutine(emptyState(), unfrozen(null));
     expect(resolved.exercises).toEqual([]);
   });
 });

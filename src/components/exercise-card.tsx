@@ -126,7 +126,7 @@ export function ExerciseCard({
 
       {prior ? (
         <p className="text-muted mb-2 px-1.5 text-[13px]">
-          Last ({formatWeekLabel(prior.weekKey)}):{' '}
+          Last{prior.date ? ` (${formatWeekLabel(prior.date)})` : ''}:{' '}
           <strong className="tnum text-ocean-deep font-semibold">
             {formatSetSummary(prior.sets[0])}
           </strong>

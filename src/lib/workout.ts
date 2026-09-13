@@ -6,76 +6,74 @@ import {
   type ExerciseLog,
   type SetEntry,
   type SideEntry,
+  type WorkoutSession,
   type WorkoutState,
-  type WorkoutWeek,
 } from './types';
-import { priorWeekKeys } from './week';
 import { setVolume, sideTotals } from './volume';
-import { ensureDaySnapshot, resolveWeekRoutine } from './routine';
-
-export const emptyWeek = (): WorkoutWeek => ({ days: {}, completion: {} });
-
-export const getWeek = (state: WorkoutState, key: string): WorkoutWeek =>
-  state.weeks[key] ?? emptyWeek();
+import { ensureSessionSnapshot, resolveSessionRoutine } from './routine';
+import {
+  compareSessions,
+  effectiveDate,
+  isDateKnown,
+  orderedSessions,
+} from './sessions';
+import { parseDateKey, weekKey as weekKeyOf } from './week';
 
 export function getLog(
   state: WorkoutState,
-  key: string,
-  dayId: string,
+  sessionId: string,
   slotId: string,
 ): ExerciseLog | undefined {
-  return state.weeks[key]?.days[dayId]?.exercises[slotId];
+  return state.sessions[sessionId]?.exercises[slotId];
 }
 
 export function getSets(
   state: WorkoutState,
-  key: string,
-  dayId: string,
+  sessionId: string,
   slotId: string,
   unilateral = false,
 ): SetEntry[] {
-  const sets = getLog(state, key, dayId, slotId)?.sets;
+  const sets = getLog(state, sessionId, slotId)?.sets;
   return sets && sets.length > 0 ? sets : [blankSet(unilateral)];
 }
 
 /**
- * Immutably replace the set list for one slot.
+ * Immutably replace the set list for one slot of one session.
  *
  * `movementId` is always the slot's CURRENT movement — never one carried over
  * from a prior performance — so a substituted slot records what was actually
- * performed. The snapshot is taken here rather than at call sites so no write
- * path can skip it.
+ * performed. The snapshot is frozen here rather than at call sites so no write
+ * path can skip it, and the performed date is captured on this first write for
+ * the same reason.
  */
 export function withSets(
   state: WorkoutState,
-  key: string,
-  dayId: string,
+  sessionId: string,
   slotId: string,
   sets: SetEntry[],
   movementId: string,
   unilateral?: boolean,
+  today?: string,
 ): WorkoutState {
-  const snapshotted = ensureDaySnapshot(state, key, dayId);
-  const week = getWeek(snapshotted, key);
-  const day = week.days[dayId] ?? { exercises: {} };
+  const snapshotted = ensureSessionSnapshot(state, sessionId);
+  const session = snapshotted.sessions[sessionId];
+  if (!session) return state;
   return {
     ...snapshotted,
-    weeks: {
-      ...snapshotted.weeks,
-      [key]: {
-        ...week,
-        days: {
-          ...week.days,
-          [dayId]: {
-            ...day,
-            exercises: {
-              ...day.exercises,
-              [slotId]: {
-                movementId,
-                ...(unilateral ? { unilateral: true } : {}),
-                sets,
-              },
-            },
+    sessions: {
+      ...snapshotted.sessions,
+      [sessionId]: {
+        ...session,
+        // Logging is training: if nothing has dated this session yet, the date
+        // it was first logged on is the date it happened.
+        ...(today && !session.performedDate ? { performedDate: today } : {}),
+        exercises: {
+          ...session.exercises,
+          [slotId]: {
+            movementId,
+            ...(unilateral ? { unilateral: true } : {}),
+            unit: session.exercises[slotId]?.unit ?? snapshotted.unit,
+            sets,
           },
         },
       },
@@ -83,26 +81,49 @@ export function withSets(
   };
 }
 
+/**
+ * Mark a session finished, or reopen it. Goes through the status contract, so
+ * an impossible transition is refused rather than written.
+ */
 export function withCompletion(
   state: WorkoutState,
-  key: string,
-  dayId: string,
+  sessionId: string,
   done: boolean,
+  now?: number,
 ): WorkoutState {
-  const snapshotted = ensureDaySnapshot(state, key, dayId);
-  const week = getWeek(snapshotted, key);
+  const snapshotted = ensureSessionSnapshot(state, sessionId);
+  const session = snapshotted.sessions[sessionId];
+  if (!session) return state;
+
+  if (done) {
+    if (session.status === 'completed') return snapshotted;
+    return {
+      ...snapshotted,
+      sessions: {
+        ...snapshotted.sessions,
+        [sessionId]: {
+          ...session,
+          status: 'completed',
+          ...(now ? { finishedAt: now } : {}),
+        },
+      },
+    };
+  }
+  if (session.status !== 'completed') return snapshotted;
   return {
     ...snapshotted,
-    weeks: {
-      ...snapshotted.weeks,
-      [key]: { ...week, completion: { ...week.completion, [dayId]: done } },
+    sessions: {
+      ...snapshotted.sessions,
+      [sessionId]: { ...session, status: 'scheduled' },
     },
   };
 }
 
 export type PriorPerformance = {
-  weekKey: string;
-  dayId: string;
+  sessionId: string;
+  /** The date it was performed, or null for an undated migrated session. */
+  date: string | null;
+  dayId: string | null;
   slotId: string;
   movementId: string;
   unilateral: boolean;
@@ -110,51 +131,87 @@ export type PriorPerformance = {
 };
 
 /**
- * The most recent logging of a movement, from any earlier week, any day and
+ * Where to measure "prior" from: a session, or a bare date for the common case
+ * where nothing has been logged yet and so no session exists. An empty anchor
+ * means "everything logged so far", which is the right answer when the athlete
+ * has not started this exercise.
+ */
+export type PriorAnchor = {
+  sessionId?: string;
+  date?: string | null;
+};
+
+/**
+ * The most recent logging of a movement, from any earlier session, any day and
  * any slot.
  *
  * Keying on the movement rather than the slot is what keeps a substituted
- * exercise's progression separate from the one it replaced: swap in Front
- * Squat and the card shows Front Squat's own history, wherever it was last
- * performed, while Back Squat's history stays untouched and returns if you
- * swap back. Ties within a week resolve to the same day, then the same slot,
- * so the result is deterministic.
+ * exercise's progression separate from the one it replaced: swap in Front Squat
+ * and the card shows Front Squat's own history, wherever it was last performed,
+ * while Back Squat's history stays untouched and returns if you swap back.
+ *
+ * "Earlier" is chronological order over sessions, so a workout trained late
+ * counts as later. Ties inside one session resolve to the same day, then the
+ * same slot, so the result is deterministic.
  */
 export function findPriorPerformance(
   state: WorkoutState,
-  currentKey: string,
+  anchor: PriorAnchor,
   movementId: string,
   preferDayId?: string,
   preferSlotId?: string,
 ): PriorPerformance | null {
   if (!movementId) return null;
 
-  for (const weekKey of priorWeekKeys(Object.keys(state.weeks), currentKey)) {
-    const week = state.weeks[weekKey];
-    if (!week) continue;
+  const current: WorkoutSession | null =
+    (anchor.sessionId ? state.sessions[anchor.sessionId] : undefined) ??
+    (anchor.date
+      ? {
+          sessionId: '',
+          routineDayId: null,
+          status: 'scheduled',
+          exercises: {},
+          performedDate: anchor.date,
+        }
+      : null);
 
-    const matches: PriorPerformance[] = [];
-    for (const [dayId, dayLog] of Object.entries(week.days)) {
-      for (const [slotId, log] of Object.entries(dayLog.exercises)) {
-        if (log?.movementId !== movementId) continue;
-        const sets = (log.sets ?? []).filter(hasAnyValue);
-        if (sets.length === 0) continue;
-        matches.push({
-          weekKey,
-          dayId,
-          slotId,
-          movementId,
-          unilateral: Boolean(log.unilateral),
-          sets,
-        });
-      }
+  // Newest first, excluding the anchor itself and anything at or after it.
+  const earlier = orderedSessions(state)
+    .filter((session) => session.sessionId !== anchor.sessionId)
+    .filter((session) => !current || compareSessions(session, current) < 0)
+    .reverse();
+
+  // Sessions sharing a date are one tier: the athlete did both on the same
+  // day, so "which of these two" is a preference question, not a recency one.
+  // Collecting the whole tier before ranking is what keeps prefer-same-slot and
+  // prefer-same-day meaningful when a movement appears twice in a week.
+  const matches: PriorPerformance[] = [];
+  let tierDate: string | null | undefined;
+
+  for (const session of earlier) {
+    const date = effectiveDate(session);
+    if (matches.length > 0 && date !== tierDate) break;
+
+    for (const [slotId, log] of Object.entries(session.exercises)) {
+      if (log?.movementId !== movementId) continue;
+      const sets = (log.sets ?? []).filter(hasAnyValue);
+      if (sets.length === 0) continue;
+      matches.push({
+        sessionId: session.sessionId,
+        date,
+        dayId: session.routineDayId,
+        slotId,
+        movementId,
+        unilateral: Boolean(log.unilateral),
+        sets,
+      });
+      tierDate = date;
     }
-    if (matches.length === 0) continue;
-
-    matches.sort((a, b) => rank(a) - rank(b));
-    return matches[0];
   }
-  return null;
+  if (matches.length === 0) return null;
+
+  matches.sort((a, b) => rank(a) - rank(b));
+  return matches[0];
 
   function rank(match: PriorPerformance): number {
     if (preferSlotId && match.slotId === preferSlotId) return 0;
@@ -204,25 +261,30 @@ export function updateSet(
 }
 
 /**
- * Exercises in a day with at least one logged row, counted only for slots the
- * day actually plans. Orphaned logs from removed slots are excluded so the
- * "X/Y logged" numerator cannot exceed its denominator.
+ * Exercises in a session with at least one logged row, counted only for slots
+ * the session actually plans. Orphaned logs from removed slots are excluded so
+ * the "X/Y logged" numerator cannot exceed its denominator.
  */
 export function countLoggedExercises(
   state: WorkoutState,
-  key: string,
-  dayId: string,
+  sessionId: string,
 ): number {
-  const planned = resolveWeekRoutine(state, key, dayId).exercises;
-  const exercises = state.weeks[key]?.days[dayId]?.exercises ?? {};
+  const session = state.sessions[sessionId];
+  if (!session) return 0;
+  const planned = resolveSessionRoutine(state, session).exercises;
   return planned.filter((slot) =>
-    (exercises[slot.slotId]?.sets ?? []).some(isLoggedSet),
+    (session.exercises[slot.slotId]?.sets ?? []).some(isLoggedSet),
   ).length;
 }
 
 export type HistoryEntry = {
-  weekKey: string;
-  dayId: string;
+  sessionId: string;
+  /** The routine day it came from, or null for an ad-hoc workout. */
+  dayId: string | null;
+  /** Null for a migrated session whose date was never recorded. */
+  date: string | null;
+  /** The week it falls in, which a migrated session still knows. */
+  weekKey: string | null;
   dayLabel: string;
   dayName: string;
   sets: number;
@@ -232,55 +294,45 @@ export type HistoryEntry = {
 };
 
 /**
- * Sessions with logged data, newest week first, then routine order.
+ * Sessions with logged data, newest first.
  *
- * Labels come from the week's frozen snapshot, so renaming a day never
+ * Labels come from each session's frozen snapshot, so renaming a day never
  * rewrites what a past session says it was.
  */
 export function buildHistory(state: WorkoutState): HistoryEntry[] {
-  const order = new Map(
-    state.routine.map((day, index) => [day.dayId, index] as const),
-  );
   const archivedIds = new Set(
     state.routine.filter((day) => day.archived).map((day) => day.dayId),
   );
   const entries: HistoryEntry[] = [];
 
-  for (const weekKey of Object.keys(state.weeks).sort().reverse()) {
-    const week = state.weeks[weekKey];
-    const dayIds = Object.keys(week.days).sort(
-      (a, b) =>
-        (order.get(a) ?? Number.MAX_SAFE_INTEGER) -
-        (order.get(b) ?? Number.MAX_SAFE_INTEGER),
-    );
-
-    for (const dayId of dayIds) {
-      const exercises = week.days[dayId]?.exercises;
-      if (!exercises) continue;
-
-      let sets = 0;
-      let volume = 0;
-      for (const log of Object.values(exercises)) {
-        for (const set of log?.sets ?? []) {
-          if (!hasAnyValue(set)) continue;
-          sets += 1;
-          volume += setVolume(set);
-        }
+  for (const session of orderedSessions(state).reverse()) {
+    let sets = 0;
+    let volume = 0;
+    for (const log of Object.values(session.exercises)) {
+      for (const set of log?.sets ?? []) {
+        if (!hasAnyValue(set)) continue;
+        sets += 1;
+        volume += setVolume(set);
       }
-      if (sets === 0) continue;
-
-      const resolved = resolveWeekRoutine(state, weekKey, dayId);
-      entries.push({
-        weekKey,
-        dayId,
-        dayLabel: resolved.label,
-        dayName: resolved.name,
-        sets,
-        volume,
-        completed: Boolean(week.completion[dayId]),
-        archived: archivedIds.has(dayId),
-      });
     }
+    if (sets === 0) continue;
+
+    const resolved = resolveSessionRoutine(state, session);
+    const date = effectiveDate(session);
+    entries.push({
+      sessionId: session.sessionId,
+      dayId: session.routineDayId,
+      date: isDateKnown(session) ? date : null,
+      weekKey: date === null ? null : weekKeyOf(parseDateKey(date)),
+      dayLabel: resolved.label,
+      dayName: resolved.name,
+      sets,
+      volume,
+      completed: session.status === 'completed',
+      archived: session.routineDayId
+        ? archivedIds.has(session.routineDayId)
+        : false,
+    });
   }
   return entries;
 }
@@ -296,35 +348,36 @@ export function sideProgression(
   leftReps: number;
   rightReps: number;
 }[] {
-  const rows: {
-    weekKey: string;
-    left: number;
-    right: number;
-    leftReps: number;
-    rightReps: number;
-  }[] = [];
+  const byWeek = new Map<
+    string,
+    { left: number; right: number; leftReps: number; rightReps: number }
+  >();
 
-  for (const weekKey of Object.keys(state.weeks).sort()) {
-    let left = 0;
-    let right = 0;
-    let leftReps = 0;
-    let rightReps = 0;
-    let found = false;
+  for (const session of orderedSessions(state)) {
+    const date = effectiveDate(session);
+    if (date === null) continue;
+    const key = weekKeyOf(parseDateKey(date));
 
-    for (const dayLog of Object.values(state.weeks[weekKey].days)) {
-      for (const log of Object.values(dayLog.exercises)) {
-        if (log?.movementId !== movementId || !log.unilateral) continue;
-        const totals = sideTotals(log.sets ?? []);
-        left += totals.left;
-        right += totals.right;
-        leftReps += totals.leftReps;
-        rightReps += totals.rightReps;
-        found = true;
-      }
+    for (const log of Object.values(session.exercises)) {
+      if (log?.movementId !== movementId || !log.unilateral) continue;
+      const totals = sideTotals(log.sets ?? []);
+      const row = byWeek.get(key) ?? {
+        left: 0,
+        right: 0,
+        leftReps: 0,
+        rightReps: 0,
+      };
+      row.left += totals.left;
+      row.right += totals.right;
+      row.leftReps += totals.leftReps;
+      row.rightReps += totals.rightReps;
+      byWeek.set(key, row);
     }
-    if (found) rows.push({ weekKey, left, right, leftReps, rightReps });
   }
-  return rows;
+
+  return [...byWeek.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([weekKey, row]) => ({ weekKey, ...row }));
 }
 
 const formatSide = (side: SideEntry): string => {

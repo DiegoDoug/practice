@@ -24,7 +24,20 @@ const migrate = (input: unknown): WorkoutState => {
   return result.state;
 };
 
-describe('v3 → v4 log keys', () => {
+/**
+ * The session a legacy (week, day) migrated into. These suites now run the
+ * whole v3 → v5 chain, which is what a real backup goes through.
+ */
+const sessionOf = (state: WorkoutState, weekKey: string, dayId: string) => {
+  const found = Object.values(state.sessions).find(
+    (session) =>
+      session.legacyWeekKey === weekKey && session.routineDayId === dayId,
+  );
+  if (!found) throw new Error(`no migrated session for ${weekKey}/${dayId}`);
+  return found;
+};
+
+describe('v3 migration: log keys', () => {
   it('maps a positional key onto a deterministic slot id', () => {
     const state = migrate(
       v3({
@@ -44,7 +57,7 @@ describe('v3 → v4 log keys', () => {
       }),
     );
 
-    const exercises = state.weeks['2026-09-07'].days.day1.exercises;
+    const exercises = sessionOf(state, '2026-09-07', 'day1').exercises;
     expect(Object.keys(exercises).sort()).toEqual(['day1-s0', 'day1-s3']);
     expect(exercises['day1-s0'].sets[0].weight).toBe('135');
     expect(exercises['day1-s3'].sets[0].reps).toBe('15');
@@ -81,7 +94,7 @@ describe('v3 → v4 log keys', () => {
     );
     // Day 2 slot 2 is Barbell Row in the seeded program.
     expect(
-      state.weeks['2026-09-07'].days.day2.exercises['day2-s2'].movementId,
+      sessionOf(state, '2026-09-07', 'day2').exercises['day2-s2'].movementId,
     ).toBe('barbell-row');
   });
 });
@@ -110,7 +123,7 @@ describe('v3 → v4 name overrides', () => {
   });
 });
 
-describe('v3 → v4 orphaned logs', () => {
+describe('v3 migration: orphaned logs', () => {
   it('keeps a log whose key is out of range', () => {
     const state = migrate(
       v3({
@@ -128,7 +141,7 @@ describe('v3 → v4 orphaned logs', () => {
         },
       }),
     );
-    const exercises = state.weeks['2026-09-07'].days.day1.exercises;
+    const exercises = sessionOf(state, '2026-09-07', 'day1').exercises;
     expect(exercises['day1-legacy99']).toBeDefined();
     expect(exercises['day1-legacy99'].movementId).toBe(UNKNOWN_MOVEMENT_ID);
     expect(exercises['day1-legacy99'].sets[0].weight).toBe('1');
@@ -152,7 +165,7 @@ describe('v3 → v4 orphaned logs', () => {
       }),
     );
     expect(
-      state.weeks['2026-09-07'].days.day1.exercises['day1-legacyodd'],
+      sessionOf(state, '2026-09-07', 'day1').exercises['day1-legacyodd'],
     ).toBeDefined();
   });
 
@@ -176,12 +189,12 @@ describe('v3 → v4 orphaned logs', () => {
     const day = findDay(state.routine, 'day9');
     expect(day?.archived).toBe(true);
     expect(
-      state.weeks['2026-09-07'].days.day9.exercises['day9-legacy0'],
+      sessionOf(state, '2026-09-07', 'day9').exercises['day9-legacy0'],
     ).toBeDefined();
   });
 });
 
-describe('v3 → v4 snapshots', () => {
+describe('v3 migration: snapshots', () => {
   it('backfills a snapshot for every logged day', () => {
     const state = migrate(
       v3({
@@ -201,7 +214,7 @@ describe('v3 → v4 snapshots', () => {
       }),
     );
 
-    const snapshot = state.weeks['2026-09-07'].routine?.day1;
+    const snapshot = sessionOf(state, '2026-09-07', 'day1').snapshot;
     expect(snapshot?.label).toBe('Day 1');
     expect(snapshot?.name).toBe('Push');
     // The name recorded is the one that was in effect, override included.
@@ -209,7 +222,9 @@ describe('v3 → v4 snapshots', () => {
     expect(snapshot?.exercises[0].group).toBe('Push');
   });
 
-  it('writes no snapshot for a day with no logs', () => {
+  it('keeps a day that was completed with nothing logged', () => {
+    // v4 wrote no snapshot for such a day; v5 still has to keep the session,
+    // or a finished workout would vanish because it happened to be empty.
     const state = migrate(
       v3({
         weeks: {
@@ -220,11 +235,13 @@ describe('v3 → v4 snapshots', () => {
         },
       }),
     );
-    expect(state.weeks['2026-09-07'].routine).toBeUndefined();
+    const session = sessionOf(state, '2026-09-07', 'day1');
+    expect(session.status).toBe('completed');
+    expect(session.exercises).toEqual({});
   });
 });
 
-describe('v3 → v4 routine seeding', () => {
+describe('v3 migration: routine seeding', () => {
   it('preserves the seeded program shape', () => {
     const state = migrate(v3());
     expect(state.routine.map((d) => d.exercises.length)).toEqual([

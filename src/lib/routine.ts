@@ -1,12 +1,15 @@
 import { PROGRAM } from './program';
 import { UNKNOWN_MOVEMENT_ID, seededMovements, slugify } from './movements';
+import { loadModeFor } from './measure';
 import type {
   Movement,
   RoutineDay,
   RoutineDaySnapshot,
   RoutineExercise,
+  SessionSnapshot,
+  SnapshotExercise,
+  WorkoutSession,
   WorkoutState,
-  WorkoutWeek,
 } from './types';
 
 export const slotIdFor = (dayId: string, index: number): string =>
@@ -142,116 +145,169 @@ export function snapshotDay(
   };
 }
 
-const emptyWeek = (): WorkoutWeek => ({ days: {}, completion: {} });
+/**
+ * Enrich a slot with the facts analytics needs frozen: how its load is
+ * recorded, and which muscles it trains. Both are read from the library at
+ * freeze time, so a later library edit cannot rewrite historical workload.
+ */
+const snapshotExercise = (
+  movements: Record<string, Movement>,
+  entry: {
+    slotId: string;
+    movementId: string;
+    name: string;
+    group: string;
+    unilateral?: boolean;
+  },
+): SnapshotExercise => {
+  const movement = movements[entry.movementId];
+  return {
+    ...entry,
+    loadMode: loadModeFor(movement?.equipment ?? 'other'),
+    primaryMuscles: movement?.primaryMuscles ?? [],
+    secondaryMuscles: movement?.secondaryMuscles ?? [],
+  };
+};
 
-const writeSnapshot = (
-  state: WorkoutState,
-  weekKey: string,
-  dayId: string,
+/** Freeze a routine day as a session snapshot, with any swaps applied. */
+export function sessionSnapshotOf(
+  movements: Record<string, Movement>,
+  day: RoutineDay,
+  substitutions: Record<string, string> = {},
+): SessionSnapshot {
+  const base = snapshotDay(movements, day, substitutions);
+  return {
+    label: base.label,
+    name: base.name,
+    exercises: base.exercises.map((entry) =>
+      snapshotExercise(movements, entry),
+    ),
+    groups: (day.groups ?? []).map((group) => ({ ...group })),
+  };
+}
+
+/**
+ * Widen a v4 snapshot into a session snapshot. The stored names and groups are
+ * kept exactly as they were logged; only the new fields are filled in.
+ */
+export function upgradeSnapshot(
+  movements: Record<string, Movement>,
   snapshot: RoutineDaySnapshot,
+): SessionSnapshot {
+  return {
+    label: snapshot.label,
+    name: snapshot.name,
+    exercises: snapshot.exercises.map((entry) =>
+      snapshotExercise(movements, entry),
+    ),
+    groups: [],
+  };
+}
+
+const writeSessionSnapshot = (
+  state: WorkoutState,
+  sessionId: string,
+  snapshot: SessionSnapshot,
 ): WorkoutState => {
-  const week = state.weeks[weekKey] ?? emptyWeek();
+  const session = state.sessions[sessionId];
+  if (!session) return state;
   return {
     ...state,
-    weeks: {
-      ...state.weeks,
-      [weekKey]: {
-        ...week,
-        routine: { ...(week.routine ?? {}), [dayId]: snapshot },
-      },
-    },
+    sessions: { ...state.sessions, [sessionId]: { ...session, snapshot } },
   };
 };
 
 /**
- * Freeze the routine for a (week, day) the first time it is written to.
+ * Freeze a session's routine the first time it is written to.
  *
- * Called from inside `withSets` and `withCompletion` rather than at their call
- * sites, so no write path can forget it. Once written, only
- * `refreshOpenSnapshots` may change it, and only while the day is incomplete
- * and in the current week.
+ * Called from inside the write paths rather than at their call sites, so no
+ * write can forget it. Once frozen, only `refreshOpenSnapshots` may change it,
+ * and only while the session has not been completed.
  */
-export function ensureDaySnapshot(
+export function ensureSessionSnapshot(
   state: WorkoutState,
-  weekKey: string,
-  dayId: string,
+  sessionId: string,
 ): WorkoutState {
-  if (state.weeks[weekKey]?.routine?.[dayId]) return state;
-  const day = findDay(state.routine, dayId);
+  const session = state.sessions[sessionId];
+  if (!session || session.snapshot) return state;
+  const day = session.routineDayId
+    ? findDay(state.routine, session.routineDayId)
+    : undefined;
   if (!day) return state;
-  return writeSnapshot(
+  return writeSessionSnapshot(
     state,
-    weekKey,
-    dayId,
-    snapshotDay(state.movements, day),
+    sessionId,
+    sessionSnapshotOf(state.movements, day, session.substitutions),
   );
 }
 
 /**
- * Re-freeze the current week's snapshots after a routine edit.
+ * Re-freeze open sessions after a routine edit.
  *
- * Only days that are in the current week AND not yet marked complete are
- * updated — editing the plan must never rewrite what a finished session says
- * it was. Past weeks are never touched.
+ * Only sessions that are not completed are updated — editing the plan must
+ * never rewrite what a finished session says it was. A session with no routine
+ * day has nothing to re-freeze from.
  */
 export function refreshOpenSnapshots(
   state: WorkoutState,
-  currentWeekKey: string,
+  sessionIds: string[],
 ): WorkoutState {
-  const week = state.weeks[currentWeekKey];
-  if (!week?.routine) return state;
-
   let next = state;
-  for (const dayId of Object.keys(week.routine)) {
-    if (week.completion[dayId]) continue;
-    const day = findDay(state.routine, dayId);
+  for (const sessionId of sessionIds) {
+    const session = next.sessions[sessionId];
+    if (!session || session.status === 'completed') continue;
+    if (!session.snapshot || !session.routineDayId) continue;
+    const day = findDay(next.routine, session.routineDayId);
     if (!day) continue;
-    next = writeSnapshot(
+    next = writeSessionSnapshot(
       next,
-      currentWeekKey,
-      dayId,
-      snapshotDay(state.movements, day, week.substitutions),
+      sessionId,
+      sessionSnapshotOf(next.movements, day, session.substitutions),
     );
   }
   return next;
 }
 
+const emptySnapshot = (label: string): SessionSnapshot => ({
+  label,
+  name: '',
+  exercises: [],
+  groups: [],
+});
+
 /**
- * The routine to render a (week, day) with: the frozen snapshot when one
- * exists, otherwise the current routine. Every consumer — the day screen,
- * History, CSV and the progress count — reads through this.
+ * The routine to render a session with: its frozen snapshot when it has one,
+ * otherwise the current routine day. Every consumer — the day screen, History,
+ * CSV, the progress count — reads through this.
  */
-export function resolveWeekRoutine(
+export function resolveSessionRoutine(
   state: WorkoutState,
-  weekKey: string,
-  dayId: string,
-): RoutineDaySnapshot {
-  const snapshot = state.weeks[weekKey]?.routine?.[dayId];
-  if (snapshot) return snapshot;
-  const day = findDay(state.routine, dayId);
+  session: WorkoutSession | null | undefined,
+): SessionSnapshot {
+  if (!session) return emptySnapshot('');
+  if (session.snapshot) return session.snapshot;
+  const day = session.routineDayId
+    ? findDay(state.routine, session.routineDayId)
+    : undefined;
   if (day) {
-    return snapshotDay(
-      state.movements,
-      day,
-      state.weeks[weekKey]?.substitutions,
-    );
+    return sessionSnapshotOf(state.movements, day, session.substitutions);
   }
-  return { label: dayId, name: '', exercises: [] };
+  return emptySnapshot(session.routineDayId ?? '');
 }
 
-/** True when any week holds logged data for this slot. */
+/** True when any session holds logged data for this slot. */
 export function slotHasHistory(state: WorkoutState, slotId: string): boolean {
-  return Object.values(state.weeks).some((week) =>
-    Object.values(week.days).some((day) =>
-      Boolean(day.exercises[slotId]?.sets?.length),
-    ),
+  return Object.values(state.sessions).some((session) =>
+    Boolean(session.exercises[slotId]?.sets?.length),
   );
 }
 
-/** True when any week holds logged data for any slot in this day. */
+/** True when any session holds logged data for any slot in this day. */
 export function dayHasHistory(state: WorkoutState, dayId: string): boolean {
-  return Object.values(state.weeks).some(
-    (week) => Object.keys(week.days[dayId]?.exercises ?? {}).length > 0,
+  return Object.values(state.sessions).some(
+    (session) =>
+      session.routineDayId === dayId &&
+      Object.keys(session.exercises).length > 0,
   );
 }
 
@@ -537,127 +593,125 @@ export function pickInitialDay(
 
 // --- Substitution --------------------------------------------------------
 
-/** The movement a slot is actually being performed as in a given week. */
+/** The movement a slot is actually being performed as in a given session. */
 export function effectiveMovementId(
   state: WorkoutState,
-  weekKey: string,
-  dayId: string,
+  session: WorkoutSession | null | undefined,
   slotId: string,
 ): string {
-  const resolved = resolveWeekRoutine(state, weekKey, dayId).exercises.find(
+  const resolved = resolveSessionRoutine(state, session).exercises.find(
     (slot) => slot.slotId === slotId,
   );
   if (resolved) return resolved.movementId;
+  const dayId = session?.routineDayId ?? '';
   return findSlot(findDay(state.routine, dayId), slotId)?.movementId ?? '';
 }
 
-/** True when this week already holds logged sets for a slot. */
-export function slotHasSetsThisWeek(
+/** True when a session already holds entered values for a slot. */
+export function slotHasSetsInSession(
   state: WorkoutState,
-  weekKey: string,
-  dayId: string,
+  sessionId: string,
   slotId: string,
 ): boolean {
-  const sets = state.weeks[weekKey]?.days[dayId]?.exercises[slotId]?.sets ?? [];
+  const sets = state.sessions[sessionId]?.exercises[slotId]?.sets ?? [];
+  const sideHasText = (side: { weight: string; reps: string; rpe: string }) =>
+    side.weight.trim() !== '' ||
+    side.reps.trim() !== '' ||
+    side.rpe.trim() !== '';
   return sets.some(
-    (set) =>
-      set.weight.trim() !== '' ||
-      set.reps.trim() !== '' ||
-      set.rpe.trim() !== '' ||
-      Boolean(
-        set.right &&
-        (set.right.weight.trim() !== '' ||
-          set.right.reps.trim() !== '' ||
-          set.right.rpe.trim() !== ''),
-      ),
+    (set) => sideHasText(set) || Boolean(set.right && sideHasText(set.right)),
   );
 }
 
-/**
- * Swap a slot's movement for this week only, leaving the routine alone.
- *
- * The swap is recorded on the week rather than baked into the snapshot, so a
- * later routine edit — which re-freezes open snapshots — cannot undo it. Any
- * log rows for the slot are cleared, because they belong to the movement being
- * replaced; callers are expected to confirm first.
- */
-export function substituteForWeek(
+const patchSession = (
   state: WorkoutState,
-  weekKey: string,
-  dayId: string,
+  sessionId: string,
+  fn: (session: WorkoutSession) => WorkoutSession,
+): WorkoutState => {
+  const session = state.sessions[sessionId];
+  if (!session) return state;
+  return {
+    ...state,
+    sessions: { ...state.sessions, [sessionId]: fn(session) },
+  };
+};
+
+/**
+ * Swap a slot's movement for one session only, leaving the routine alone.
+ *
+ * The swap is recorded on the session rather than baked straight into its
+ * snapshot, so a later routine edit — which re-freezes open snapshots — cannot
+ * quietly undo it. Log rows for the slot are cleared, because they belong to
+ * the movement being replaced; callers confirm first.
+ */
+export function substituteForSession(
+  state: WorkoutState,
+  sessionId: string,
   slotId: string,
   movementId: string,
 ): WorkoutState {
-  const week = state.weeks[weekKey] ?? { days: {}, completion: {} };
-  const day = week.days[dayId];
-  const exercises = { ...(day?.exercises ?? {}) };
-  delete exercises[slotId];
+  const swapped = patchSession(state, sessionId, (session) => {
+    const exercises = { ...session.exercises };
+    delete exercises[slotId];
+    return {
+      ...session,
+      exercises,
+      substitutions: { ...(session.substitutions ?? {}), [slotId]: movementId },
+    };
+  });
 
-  const withSubstitution: WorkoutState = {
-    ...state,
-    weeks: {
-      ...state.weeks,
-      [weekKey]: {
-        ...week,
-        days: { ...week.days, [dayId]: { exercises } },
-        substitutions: { ...(week.substitutions ?? {}), [slotId]: movementId },
-      },
-    },
-  };
-
-  const routineDay = findDay(withSubstitution.routine, dayId);
-  if (!routineDay) return withSubstitution;
-  return writeSnapshot(
-    withSubstitution,
-    weekKey,
-    dayId,
-    snapshotDay(
-      withSubstitution.movements,
-      routineDay,
-      withSubstitution.weeks[weekKey].substitutions,
-    ),
+  const session = swapped.sessions[sessionId];
+  const day = session?.routineDayId
+    ? findDay(swapped.routine, session.routineDayId)
+    : undefined;
+  if (!session || !day) return swapped;
+  return writeSessionSnapshot(
+    swapped,
+    sessionId,
+    sessionSnapshotOf(swapped.movements, day, session.substitutions),
   );
 }
 
-/** Drop a this-week swap, returning the slot to what the routine plans. */
-export function clearWeekSubstitution(
+/** Drop a session swap, returning the slot to what the routine plans. */
+export function clearSessionSubstitution(
   state: WorkoutState,
-  weekKey: string,
-  dayId: string,
+  sessionId: string,
   slotId: string,
 ): WorkoutState {
-  const week = state.weeks[weekKey];
-  if (!week?.substitutions?.[slotId]) return state;
+  if (!state.sessions[sessionId]?.substitutions?.[slotId]) return state;
 
-  const substitutions = { ...week.substitutions };
-  delete substitutions[slotId];
+  const cleared = patchSession(state, sessionId, (session) => {
+    const substitutions = { ...session.substitutions };
+    delete substitutions[slotId];
+    return { ...session, substitutions };
+  });
 
-  const cleared: WorkoutState = {
-    ...state,
-    weeks: { ...state.weeks, [weekKey]: { ...week, substitutions } },
-  };
-  const routineDay = findDay(cleared.routine, dayId);
-  if (!routineDay) return cleared;
-  return writeSnapshot(
+  const session = cleared.sessions[sessionId];
+  const day = session?.routineDayId
+    ? findDay(cleared.routine, session.routineDayId)
+    : undefined;
+  if (!session || !day) return cleared;
+  return writeSessionSnapshot(
     cleared,
-    weekKey,
-    dayId,
-    snapshotDay(cleared.movements, routineDay, substitutions),
+    sessionId,
+    sessionSnapshotOf(cleared.movements, day, session.substitutions),
   );
 }
 
 /**
  * Make a swap permanent: point the routine slot at the new movement and drop
- * the week-scoped override so the two cannot disagree.
+ * the session-scoped override so the two cannot disagree.
  */
 export function substitutePermanently(
   state: WorkoutState,
-  weekKey: string,
-  dayId: string,
+  sessionId: string,
   slotId: string,
   movementId: string,
 ): WorkoutState {
-  const swapped = substituteForWeek(state, weekKey, dayId, slotId, movementId);
-  const permanent = substituteSlot(swapped, dayId, slotId, movementId);
-  return clearWeekSubstitution(permanent, weekKey, dayId, slotId);
+  const dayId = state.sessions[sessionId]?.routineDayId;
+  const swapped = substituteForSession(state, sessionId, slotId, movementId);
+  const permanent = dayId
+    ? substituteSlot(swapped, dayId, slotId, movementId)
+    : swapped;
+  return clearSessionSubstitution(permanent, sessionId, slotId);
 }
