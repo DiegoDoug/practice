@@ -59,7 +59,10 @@ export function LiveSessionBar({
   const restDone = restLeft === 0;
 
   return (
-    <div className="sticky top-0 z-20 mb-3.5">
+    // The wrapper carries an opaque page-coloured background and the bottom
+    // gap: the bar's own tint is translucent, so without this the exercise
+    // list scrolls visibly through it.
+    <div className="bg-surface sticky top-0 z-20 pb-3.5">
       <section
         aria-label="Workout in progress"
         className={[
