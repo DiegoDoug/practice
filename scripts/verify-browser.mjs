@@ -732,6 +732,113 @@ try {
   await page.getByRole('button', { name: /^Day 1 · / }).click();
   await page.waitForTimeout(400);
 
+  // ---------- Live workout mode ----------
+  await page.getByRole('button', { name: 'Start workout' }).click();
+  await page.waitForSelector('section[aria-label="Workout in progress"]');
+  ok('starting a workout shows the session bar', true);
+
+  const bar = () => page.locator('section[aria-label="Workout in progress"]');
+  const clock = () => bar().locator('[role="timer"]').innerText();
+
+  // The bar must not sit between #day-heading and its sibling paragraph, which
+  // the progress assertion above depends on.
+  ok(
+    'the session bar sits outside the day section',
+    (await page
+      .locator(
+        'section[aria-labelledby="day-heading"] section[aria-label="Workout in progress"]',
+      )
+      .count()) === 0,
+  );
+
+  await page.waitForTimeout(2500);
+  const running = await clock();
+  ok('the elapsed clock advances', running !== '0:00', running);
+
+  await bar().getByRole('button', { name: 'Pause' }).click();
+  await page.waitForTimeout(200);
+  const frozenA = await clock();
+  await page.waitForTimeout(1600);
+  const frozenB = await clock();
+  ok(
+    'pausing freezes the clock',
+    frozenA === frozenB,
+    `${frozenA} then ${frozenB}`,
+  );
+
+  await bar().getByRole('button', { name: 'Resume' }).click();
+  await page.waitForTimeout(1600);
+  ok('resuming advances it again', (await clock()) !== frozenB, await clock());
+
+  // Elapsed is derived from timestamps, so a reload keeps counting.
+  const beforeReload = await clock();
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForSelector('section[aria-label="Workout in progress"]');
+  const afterReload = await clock();
+  const toSeconds = (text) => {
+    const parts = text.split(':').map(Number);
+    return parts.length === 3
+      ? parts[0] * 3600 + parts[1] * 60 + parts[2]
+      : parts[0] * 60 + parts[1];
+  };
+  ok(
+    'the session survives a reload and keeps counting',
+    toSeconds(afterReload) >= toSeconds(beforeReload),
+    `${beforeReload} -> ${afterReload}`,
+  );
+
+  // Rest starts when a set row is completed, not part-way through typing.
+  // Earlier checks reshape day 1, so read whatever exercise is first now
+  // rather than assuming the seeded one is still there.
+  const firstExercise = await page
+    .locator('[data-exercise="day1:0"] input:not([type="number"])')
+    .first()
+    .inputValue();
+  await page.getByLabel(`${firstExercise} set 1 weight`).fill('145');
+  await page.getByLabel(`${firstExercise} set 1 reps`).fill('5');
+  await page.getByLabel(`${firstExercise} set 1 RPE`).click();
+  await page.waitForTimeout(600);
+  ok(
+    'completing a set starts the rest timer',
+    (await bar().innerText()).includes('Rest'),
+    (await bar().innerText()).replace(/\n/g, ' | '),
+  );
+
+  await bar().getByRole('button', { name: '30s' }).click();
+  await page.waitForTimeout(300);
+  await bar().getByRole('button', { name: 'Skip rest' }).click();
+  await page.waitForTimeout(300);
+  ok(
+    'skipping rest dismisses the countdown',
+    !(await bar().innerText()).includes('Rest '),
+  );
+
+  const axeLive = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
+    .analyze();
+  ok(
+    'axe: no serious violations with the live bar showing',
+    axeLive.violations.filter((v) => ['serious', 'critical'].includes(v.impact))
+      .length === 0,
+    axeLive.violations.map((v) => `${v.id}(${v.impact})`).join(', '),
+  );
+
+  await bar().getByRole('button', { name: 'Finish workout' }).click();
+  await page.waitForTimeout(600);
+  ok(
+    'finishing hides the bar',
+    (await page
+      .locator('section[aria-label="Workout in progress"]')
+      .count()) === 0,
+  );
+  ok(
+    'finishing marks the day complete',
+    (await page
+      .locator('section[aria-labelledby="day-heading"]')
+      .getByRole('button', { name: 'Completed' })
+      .count()) === 1,
+  );
+
   // keyboard-only reachability
   await page.keyboard.press('Tab');
   const tabbed = await page.evaluate(

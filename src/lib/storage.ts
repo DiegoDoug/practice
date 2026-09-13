@@ -1,6 +1,7 @@
 import { del, get, set as idbSet } from 'idb-keyval';
 import { parseBackup, emptyState, CURRENT_SCHEMA_VERSION } from './backup';
 import type { WorkoutState } from './types';
+import type { LiveSession } from './live-session';
 
 export const STORAGE_KEY = 'weekly-practice-log/state';
 /** Key written by the original localStorage-only version, imported once. */
@@ -162,4 +163,54 @@ export function downloadBlob(blob: Blob, filename: string): void {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+// --- Live session ---------------------------------------------------------
+
+/**
+ * The in-flight workout lives under its own key, deliberately outside
+ * WorkoutState: a half-finished timer has no business in a JSON backup, and
+ * restoring a backup should not resurrect someone else's paused session.
+ */
+export const SESSION_KEY = 'weekly-practice-log/session';
+
+const isLiveSession = (value: unknown): value is LiveSession => {
+  if (typeof value !== 'object' || value === null) return false;
+  const s = value as Record<string, unknown>;
+  return (
+    typeof s.weekKey === 'string' &&
+    typeof s.dayId === 'string' &&
+    typeof s.startedAt === 'number' &&
+    (s.pausedAt === null || typeof s.pausedAt === 'number') &&
+    typeof s.pausedMs === 'number' &&
+    typeof s.restDefaultSec === 'number'
+  );
+};
+
+export async function loadSession(): Promise<LiveSession | null> {
+  if (!isBrowser()) return null;
+  try {
+    const stored = await get(SESSION_KEY);
+    return isLiveSession(stored) ? stored : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveSession(session: LiveSession): Promise<void> {
+  if (!isBrowser()) return;
+  try {
+    await idbSet(SESSION_KEY, session);
+  } catch {
+    // A lost timer is an inconvenience, never a reason to fail the workout.
+  }
+}
+
+export async function clearSession(): Promise<void> {
+  if (!isBrowser()) return;
+  try {
+    await del(SESSION_KEY);
+  } catch {
+    // As above.
+  }
 }
