@@ -6,7 +6,7 @@
  * is never given a position it cannot be given, and a record is celebrated once
  * rather than every time the same set is ticked again.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { emptyState } from '@/lib/backup';
 import {
   eligibleSets,
@@ -21,7 +21,7 @@ import {
   exerciseHistory,
   sameWeekPrior,
 } from '@/lib/progress';
-import { currentRecords, recordsBrokenBy } from '@/lib/records';
+import { celebrationKey, currentRecords, recordsBrokenBy } from '@/lib/records';
 import type { SetEntry, WorkoutSession, WorkoutState } from '@/lib/types';
 
 const BENCH = 'barbell-bench-press';
@@ -659,5 +659,173 @@ describe('recordsBrokenBy', () => {
 
   it('is silent for an unknown set id', () => {
     expect(recordsBrokenBy(emptyState(), BENCH, 'nope')).toEqual([]);
+  });
+});
+
+describe('celebration keys', () => {
+  const keyFor = (weight: string, reps: string, setId = 'target') => {
+    const state = stateWith(
+      logged('a', '2026-03-02', BENCH, [{ ...set({ weight, reps }), setId }]),
+    );
+    return recordsBrokenBy(state, BENCH, setId).map(celebrationKey);
+  };
+
+  it('is stable for the same set at the same value, so repeating is silent', () => {
+    expect(keyFor('100', '5')).toEqual(keyFor('100', '5'));
+  });
+
+  it('changes on the dimensions that improved, and only those', () => {
+    const before = keyFor('100', '5');
+    const after = keyFor('105', '5');
+    expect(after).not.toEqual(before);
+
+    // Heavier load and bigger set volume are new records, so those keys move
+    // and will celebrate again.
+    const moved = after.filter((key) => !before.includes(key));
+    expect(moved.some((key) => key.includes(':heaviest:'))).toBe(true);
+    expect(moved.some((key) => key.includes(':volume:'))).toBe(true);
+
+    // The rep count did NOT improve, so its key deliberately stays the same and
+    // stays suppressed: adding weight is not a rep record.
+    const held = after.filter((key) => before.includes(key));
+    expect(held).toEqual([`target:bilateral:mostReps:5`]);
+  });
+
+  it('changes when reps improve at the same load', () => {
+    expect(keyFor('100', '6')).not.toEqual(keyFor('100', '5'));
+  });
+
+  it('is scoped to the set id, so a restored set with a new id is unaffected', () => {
+    // Celebration keys name a setId. A restored backup brings its own ids, so
+    // old keys cannot suppress a genuinely new set's record; where a restore
+    // brings back the SAME id and value, suppression is the correct outcome
+    // because that lift was already celebrated.
+    expect(keyFor('100', '5', 'restored')).not.toEqual(
+      keyFor('100', '5', 'original'),
+    );
+  });
+});
+
+describe('undated entries claim a week but not an order within it', () => {
+  const undatedIn = (sessionId: string, weekKey: string, weight: string) =>
+    session({
+      sessionId,
+      legacyWeekKey: weekKey,
+      exercises: {
+        slot: { movementId: BENCH, sets: [set({ weight, reps: '5' })] },
+      },
+    });
+
+  it('groups two undated sessions under the same known week', () => {
+    const state = stateWith(
+      undatedIn('b', '2025-06-02', '60'),
+      undatedIn('a', '2025-06-02', '70'),
+    );
+    const rows = eligibleSets(state, { movementId: BENCH });
+    expect(rows.map((r) => r.weekKey)).toEqual(['2025-06-02', '2025-06-02']);
+    // Neither is presented as dated, so no reading can imply which came first.
+    expect(rows.every((r) => r.dateKnown === false)).toBe(true);
+    expect(rows.every((r) => r.date === null)).toBe(true);
+  });
+
+  it('orders them deterministically without that order being a claim', () => {
+    // Presentation has to pick something; running twice must pick the same
+    // thing, and it must not depend on object insertion order.
+    const forwards = stateWith(
+      undatedIn('b', '2025-06-02', '60'),
+      undatedIn('a', '2025-06-02', '70'),
+    );
+    const backwards = stateWith(
+      undatedIn('a', '2025-06-02', '70'),
+      undatedIn('b', '2025-06-02', '60'),
+    );
+    const ids = (state: WorkoutState) =>
+      eligibleSets(state, { movementId: BENCH }).map((r) => r.sessionId);
+    expect(ids(forwards)).toEqual(ids(backwards));
+  });
+
+  it('still ranks a record across undated sessions by value, not by position', () => {
+    const state = stateWith(
+      undatedIn('b', '2025-06-02', '60'),
+      undatedIn('a', '2025-06-02', '70'),
+    );
+    expect(currentRecords(state, BENCH).bilateral?.heaviest?.load.value).toBe(
+      70,
+    );
+  });
+});
+
+describe('celebration storage never blocks logging', () => {
+  /**
+   * The storage helpers short-circuit when there is no `window`, so a bare node
+   * test would pass without reaching the failure handling at all. Stubbing a
+   * window is what makes these assertions real.
+   */
+  const withWindow = async (fn: () => Promise<void>) => {
+    const had = 'window' in globalThis;
+    if (!had) (globalThis as { window?: unknown }).window = {};
+    try {
+      await fn();
+    } finally {
+      if (!had) delete (globalThis as { window?: unknown }).window;
+    }
+  };
+
+  it('survives a store that throws on every operation', async () => {
+    // Best-effort by design: a set must log and complete even when IndexedDB is
+    // unavailable (private mode, blocked site data, a quota error), so neither
+    // call may reject.
+    await withWindow(async () => {
+      vi.resetModules();
+      vi.doMock('idb-keyval', () => ({
+        get: () => {
+          throw new Error('nope');
+        },
+        set: () => {
+          throw new Error('nope');
+        },
+        del: () => {
+          throw new Error('nope');
+        },
+      }));
+      const { loadCelebrated, saveCelebrated } = await import('@/lib/storage');
+      await expect(loadCelebrated()).resolves.toEqual([]);
+      await expect(saveCelebrated(['a:b:c:1'])).resolves.toBeUndefined();
+      vi.doUnmock('idb-keyval');
+      vi.resetModules();
+    });
+  });
+
+  it('tolerates a stored value that is not a list of keys', async () => {
+    await withWindow(async () => {
+      vi.resetModules();
+      vi.doMock('idb-keyval', () => ({
+        get: async () => ({ not: 'an array' }),
+        set: async () => undefined,
+        del: async () => undefined,
+      }));
+      const { loadCelebrated } = await import('@/lib/storage');
+      await expect(loadCelebrated()).resolves.toEqual([]);
+      vi.doUnmock('idb-keyval');
+      vi.resetModules();
+    });
+  });
+
+  it('keeps only strings from a mixed stored list', async () => {
+    await withWindow(async () => {
+      vi.resetModules();
+      vi.doMock('idb-keyval', () => ({
+        get: async () => ['good:key:1', 42, null, 'other:key:2'],
+        set: async () => undefined,
+        del: async () => undefined,
+      }));
+      const { loadCelebrated } = await import('@/lib/storage');
+      await expect(loadCelebrated()).resolves.toEqual([
+        'good:key:1',
+        'other:key:2',
+      ]);
+      vi.doUnmock('idb-keyval');
+      vi.resetModules();
+    });
   });
 });

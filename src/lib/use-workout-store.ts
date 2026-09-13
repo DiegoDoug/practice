@@ -20,6 +20,14 @@ export type WorkoutStore = {
   safeMode: { error: string; raw: unknown } | null;
   /** Apply an immutable update and schedule a debounced save. */
   update: (updater: Updater) => void;
+  /**
+   * The newest state, including a write queued earlier in this same tick.
+   *
+   * `state` is the last RENDERED value, so two writes in one event would both
+   * read the same stale base from it. Anything that has to reason about the
+   * result of a write it just made — the record check — reads this instead.
+   */
+  latestState: () => WorkoutState;
   /** Replace all state and persist immediately (used by backup restore). */
   replace: (next: WorkoutState) => Promise<void>;
   flush: () => Promise<void>;
@@ -96,14 +104,22 @@ export function useWorkoutStore(): WorkoutStore {
     }, SAVE_DEBOUNCE_MS);
   }, [persist]);
 
+  /**
+   * The updater runs EAGERLY against the ref rather than being handed to
+   * `setState`.
+   *
+   * React defers a functional update until render, so with the old shape
+   * `latest.current` lagged behind by a tick and two updates dispatched from one
+   * event both saw the same base — the second silently discarding the first.
+   * Sequencing through the ref makes each update build on the previous one
+   * immediately, and `setState` just mirrors the result.
+   */
   const update = useCallback(
     (updater: Updater) => {
       if (readOnly.current) return;
-      setState((previous) => {
-        const next = updater(previous);
-        latest.current = next;
-        return next;
-      });
+      const next = updater(latest.current);
+      latest.current = next;
+      setState(next);
       schedule();
     },
     [schedule],
@@ -147,5 +163,16 @@ export function useWorkoutStore(): WorkoutStore {
     };
   }, [flush]);
 
-  return { state, hydrated, status, safeMode, update, replace, flush };
+  const latestState = useCallback(() => latest.current, []);
+
+  return {
+    state,
+    hydrated,
+    status,
+    safeMode,
+    update,
+    latestState,
+    replace,
+    flush,
+  };
 }

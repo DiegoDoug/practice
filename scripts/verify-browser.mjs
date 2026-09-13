@@ -19,6 +19,13 @@ const ok = (n, c, d = '') => {
   if (!c) process.exitCode = 1;
 };
 
+/**
+ * The app's own announcement region. Dialogs carry their own status elements,
+ * so this is pinned to the app-level one: a `p.sr-only`, which the others are
+ * not.
+ */
+const APP_LIVE_REGION = 'p.sr-only[role="status"][aria-live="polite"]';
+
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || '/opt/pw-browsers/chromium',
 });
@@ -30,6 +37,7 @@ try {
     acceptDownloads: true,
   });
   const page = await mobile.newPage();
+  const appLiveRegion = () => page.locator(APP_LIVE_REGION);
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => {
@@ -297,6 +305,14 @@ try {
     .locator('[role="dialog"] [role="status"]')
     .innerText();
   ok('restore confirms success', after.includes('Restored'), after);
+  // A restore brings in completed sets, and must celebrate none of them: the
+  // only path that celebrates is an explicit completion.
+  ok(
+    'restoring a backup celebrates no records',
+    !after.includes('New record') &&
+      !(await appLiveRegion().innerText()).includes('New record'),
+    after.slice(0, 90),
+  );
   await page.keyboard.press('Escape');
   await page.waitForTimeout(300);
 
@@ -1205,7 +1221,7 @@ try {
   await page.getByLabel(`${prExercise} set 1 weight`).fill('315');
   await page.getByLabel(`${prExercise} set 1 reps`).fill('9');
   await page.waitForTimeout(500);
-  const liveRegion = () => page.locator('[role="status"][aria-live="polite"]');
+  const liveRegion = appLiveRegion;
   await page
     .getByRole('button', { name: `Complete ${prExercise} set 1` })
     .click();
@@ -1261,6 +1277,93 @@ try {
     `${JSON.stringify(keysAfterFirst).slice(0, 80)} -> ${JSON.stringify(keysAfterSecond).slice(0, 80)}`,
   );
 
+  // An improved performance on the same set must celebrate again.
+  await page.getByLabel(`${prExercise} set 1 weight`).fill('325');
+  await page.waitForTimeout(500);
+  const beforeImprove = await celebrated();
+  if (
+    (await page
+      .getByRole('button', { name: `Reopen ${prExercise} set 1` })
+      .count()) > 0
+  ) {
+    await page
+      .getByRole('button', { name: `Reopen ${prExercise} set 1` })
+      .click();
+    await page.waitForTimeout(400);
+  }
+  await page
+    .getByRole('button', { name: `Complete ${prExercise} set 1` })
+    .click();
+  await page.waitForTimeout(900);
+  const afterImprove = await celebrated();
+  ok(
+    'an improved lift celebrates again',
+    afterImprove.length > beforeImprove.length,
+    `${beforeImprove.length} -> ${afterImprove.length}`,
+  );
+  ok(
+    'the improvement announces a record',
+    (await liveRegion().innerText()).includes('New record'),
+    (await liveRegion().innerText()).slice(0, 90),
+  );
+
+  // Two completions dispatched back to back must each be judged against the
+  // other, not both against the same stale state.
+  await page
+    .locator('[data-exercise]')
+    .first()
+    .getByRole('button', { name: /^Add set/ })
+    .click();
+  await page.waitForTimeout(500);
+  await page.getByLabel(`${prExercise} set 2 weight`).fill('405');
+  await page.getByLabel(`${prExercise} set 2 reps`).fill('2');
+  await page.waitForTimeout(500);
+  await page
+    .locator('[data-exercise]')
+    .first()
+    .getByRole('button', { name: /^Add set/ })
+    .click();
+  await page.waitForTimeout(500);
+  await page.getByLabel(`${prExercise} set 3 weight`).fill('135');
+  await page.getByLabel(`${prExercise} set 3 reps`).fill('2');
+  await page.waitForTimeout(600);
+
+  const beforeRapid = await celebrated();
+  // Heavier first, then lighter, with no wait between: the lighter set must not
+  // be judged against a state that is missing the heavier one.
+  await Promise.all([
+    page.getByRole('button', { name: `Complete ${prExercise} set 2` }).click(),
+    page.getByRole('button', { name: `Complete ${prExercise} set 3` }).click(),
+  ]);
+  await page.waitForTimeout(1200);
+  const afterRapid = await celebrated();
+  const rapidKeys = afterRapid.filter((key) => !beforeRapid.includes(key));
+  ok(
+    'the heavier of two rapid completions takes the weight record',
+    rapidKeys.some((key) => key.includes(':heaviest:405')),
+    JSON.stringify(rapidKeys).slice(0, 160),
+  );
+  ok(
+    'the lighter of two rapid completions takes no weight record',
+    !rapidKeys.some((key) => key.includes(':heaviest:135')),
+    JSON.stringify(rapidKeys).slice(0, 160),
+  );
+  ok(
+    'both rapid completions are recorded as done',
+    (await page
+      .locator('[data-exercise]')
+      .first()
+      .locator('[data-set-done="true"]')
+      .count()) >= 2,
+    String(
+      await page
+        .locator('[data-exercise]')
+        .first()
+        .locator('[data-set-done="true"]')
+        .count(),
+    ),
+  );
+
   // Reloading must not celebrate anything on hydration.
   await page.reload({ waitUntil: 'networkidle' });
   await page.waitForTimeout(900);
@@ -1298,7 +1401,7 @@ try {
   ok('records are shown', progressText.includes('Records'), '');
   ok(
     'the heaviest completed load appears',
-    progressText.includes('315'),
+    progressText.includes('405'),
     progressText.slice(0, 120),
   );
   ok(
@@ -1326,8 +1429,10 @@ try {
   );
 
   // Switching the display unit must not change what was recorded.
-  const before315 = (await page.textContent('[role="dialog"]')).includes('315');
-  ok('the record reads in the unit it was logged in', before315);
+  ok(
+    'the record reads in the unit it was logged in',
+    (await page.textContent('[role="dialog"]')).includes('405 lb'),
+  );
 
   const progressAxe = await new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
@@ -1358,8 +1463,8 @@ try {
     (await page.locator('[role="dialog"]').count()) === 0,
   );
 
-  // A warmup must not hold a record.
-  await page.getByLabel(`${prExercise} set 1 type`).selectOption('warmup');
+  // A warmup must not hold a record — applied to the set that holds it.
+  await page.getByLabel(`${prExercise} set 2 type`).selectOption('warmup');
   await page.waitForTimeout(600);
   await page.getByRole('button', { name: 'Progress' }).click();
   await page.waitForSelector('[role="dialog"]');
@@ -1374,16 +1479,16 @@ try {
     (await recordsTable.count()) > 0 ? await recordsTable.innerText() : '';
   ok(
     'a warmup set holds no record',
-    !recordsText.includes('315'),
+    !recordsText.includes('405'),
     recordsText.replace(/\n/g, ' | ').slice(0, 120),
   );
   ok(
     'the warmup still appears in the session history',
-    (await page.textContent('[role="dialog"]')).includes('315'),
+    (await page.textContent('[role="dialog"]')).includes('405'),
   );
   await page.keyboard.press('Escape');
   await page.waitForTimeout(250);
-  await page.getByLabel(`${prExercise} set 1 type`).selectOption('working');
+  await page.getByLabel(`${prExercise} set 2 type`).selectOption('working');
   await page.waitForTimeout(500);
 
   // ---------- Timer isolation between sessions ----------

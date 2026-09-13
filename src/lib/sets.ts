@@ -90,3 +90,19 @@ export function setReachedFailure(
   else delete next.reachedFailure;
   return replace(sets, index, next);
 }
+
+/**
+ * Whether `markDone` would change anything — the set exists, is not already
+ * done, and carries what its mode requires.
+ *
+ * Lets a caller decide to dispatch a completion without first computing the
+ * result against a possibly stale copy of the sets.
+ */
+export function markDoneChanges(
+  sets: SetEntry[],
+  index: number,
+  mode: CompletionMode,
+): boolean {
+  const set = sets[index];
+  return Boolean(set) && !set.done && isSetComplete(set, mode);
+}

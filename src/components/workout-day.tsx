@@ -31,7 +31,10 @@ type WorkoutDayProps = {
   session: WorkoutSession | null;
   completed: boolean;
   onToggleComplete: () => void;
-  onSetsChange: (slotId: string, sets: SetEntry[]) => void;
+  onSetsChange: (
+    slotId: string,
+    update: (previous: SetEntry[]) => SetEntry[],
+  ) => void;
   onRename: (slotId: string, name: string) => void;
   onSetComplete?: (
     slotId: string,
@@ -184,7 +187,7 @@ export function WorkoutDay({
                     ? `as ${plannedName}`
                     : undefined
                 }
-                onSetsChange={(sets) => onSetsChange(slot.slotId, sets)}
+                onSetsChange={(update) => onSetsChange(slot.slotId, update)}
                 onRename={(name) => onRename(slot.slotId, name)}
                 onSetComplete={onSetComplete}
                 onSubstitute={() => onSubstitute(slot.slotId)}

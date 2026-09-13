@@ -38,7 +38,7 @@ import {
 import { addSessionExercise, resolveDayLink } from '@/lib/calendar';
 import { celebrationKey, describeRecord, recordsBrokenBy } from '@/lib/records';
 import { useCelebrations } from '@/lib/use-celebrations';
-import type { SetEntry, WorkoutState } from '@/lib/types';
+import { blankSet, type SetEntry, type WorkoutState } from '@/lib/types';
 import { withCompletion, withSets } from '@/lib/workout';
 import {
   ensureWeekDaySession,
@@ -79,8 +79,16 @@ const SAVE_LABEL = {
 export function WorkoutApp() {
   const router = useRouter();
   const params = useSearchParams();
-  const { state, hydrated, status, safeMode, update, replace, flush } =
-    useWorkoutStore();
+  const {
+    state,
+    hydrated,
+    status,
+    safeMode,
+    update,
+    latestState,
+    replace,
+    flush,
+  } = useWorkoutStore();
   const live = useLiveSession();
   const celebrations = useCelebrations();
 
@@ -212,7 +220,7 @@ export function WorkoutApp() {
   );
 
   const onSetsChange = useCallback(
-    (slotId: string, sets: SetEntry[]) => {
+    (slotId: string, apply: (previous: SetEntry[]) => SetEntry[]) => {
       if (!activeSession && !activeDay) return;
       update((previous) => {
         // Logging is the explicit act that creates a session for a routine day,
@@ -228,11 +236,15 @@ export function WorkoutApp() {
           withSession,
           withSession.sessions[sessionId],
         ).exercises.find((entry) => entry.slotId === slotId);
+        // The updater is applied here, against the sets as they stand in the
+        // state being written — not against a snapshot the card rendered with.
+        const existing = withSession.sessions[sessionId]?.exercises[slotId]
+          ?.sets ?? [blankSet(planned?.unilateral)];
         return withSets(
           withSession,
           sessionId,
           slotId,
-          sets,
+          apply(existing),
           planned?.movementId ?? 'unknown',
           planned?.unilateral,
           today,
@@ -385,34 +397,46 @@ export function WorkoutApp() {
       }
 
       if (!setId || !movementId) return;
-      const today = toLocalDateKey(new Date());
-      const target = writeTarget(state, today);
-      if (!target) return;
 
-      const projected = withSets(
-        target.state,
-        target.sessionId,
-        slotId,
-        sets,
-        movementId,
-        unilateral,
-        today,
-      );
-      const broken = recordsBrokenBy(projected, movementId, setId);
-      if (broken.length === 0) return;
+      // A record is a nicety. Nothing in here may stop a set being logged, so
+      // the whole check is guarded: the write has already been dispatched by
+      // the caller before this runs.
+      try {
+        const today = toLocalDateKey(new Date());
+        // `latestState()`, not `state`: two completions dispatched from one
+        // event would otherwise both project from the same stale base, and the
+        // second would be judged without the first.
+        const current = latestState();
+        const target = writeTarget(current, today);
+        if (!target) return;
 
-      const fresh = celebrations.claim(broken.map(celebrationKey));
-      const announce = broken.filter((record) =>
-        fresh.includes(celebrationKey(record)),
-      );
-      if (announce.length === 0) return;
-      setAnnouncement(
-        `New record! ${announce
-          .map((record) => describeRecord(record, state.unit))
-          .join(' \u00b7 ')}`,
-      );
+        const projected = withSets(
+          target.state,
+          target.sessionId,
+          slotId,
+          sets,
+          movementId,
+          unilateral,
+          today,
+        );
+        const broken = recordsBrokenBy(projected, movementId, setId);
+        if (broken.length === 0) return;
+
+        const fresh = celebrations.claim(broken.map(celebrationKey));
+        const announce = broken.filter((record) =>
+          fresh.includes(celebrationKey(record)),
+        );
+        if (announce.length === 0) return;
+        setAnnouncement(
+          `New record! ${announce
+            .map((record) => describeRecord(record, current.unit))
+            .join(' \u00b7 ')}`,
+        );
+      } catch {
+        // Storage or computation trouble loses a congratulation, never a set.
+      }
     },
-    [activeSession, celebrations, live, state, writeTarget],
+    [activeSession, celebrations, latestState, live, writeTarget],
   );
 
   const onStartWorkout = useCallback(() => {
