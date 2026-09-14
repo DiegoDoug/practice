@@ -9,7 +9,13 @@ import {
   type SetKind,
   type SideEntry,
 } from '@/lib/types';
-import { markDone, reopen, setReachedFailure, setSetKind } from '@/lib/sets';
+import {
+  markDone,
+  markDoneChanges,
+  reopen,
+  setReachedFailure,
+  setSetKind,
+} from '@/lib/sets';
 import type { LoadMode } from '@/lib/measure';
 import {
   formatSetSummary,
@@ -33,10 +39,26 @@ type ExerciseCardProps = {
   prior: PriorPerformance | null;
   /** Set when the prior performance was logged under a different movement. */
   priorNote?: string;
-  onSetsChange: (sets: SetEntry[]) => void;
+  /**
+   * Applies a change to this slot's sets.
+   *
+   * Takes an UPDATER rather than an array: the card's `sets` prop is a render
+   * snapshot, so sending a whole array would let a second change dispatched
+   * before the next render overwrite the first. The updater is applied against
+   * whatever is current when the write lands.
+   */
+  onSetsChange: (update: (previous: SetEntry[]) => SetEntry[]) => void;
   onRename: (name: string) => void;
   /** Called only when a set actually transitions into completed. */
-  onSetComplete?: () => void;
+  onSetComplete?: (
+    slotId: string,
+    sets: SetEntry[],
+    setId?: string,
+    movementId?: string,
+    unilateral?: boolean,
+  ) => void;
+  /** The movement actually performed, for the record check. */
+  movementId?: string;
   onSubstitute?: () => void;
   /** Set when this slot is swapped for this week only. */
   substituted?: boolean;
@@ -51,6 +73,7 @@ export function ExerciseCard({
   group,
   unilateral,
   loadMode,
+  movementId,
   sets,
   prior,
   priorNote,
@@ -72,9 +95,9 @@ export function ExerciseCard({
   }, []);
 
   const addSet = useCallback(() => {
-    onSetsChange([...sets, blankSet(unilateral)]);
+    onSetsChange((previous) => [...previous, blankSet(unilateral)]);
     focusLastWeight();
-  }, [focusLastWeight, onSetsChange, sets, unilateral]);
+  }, [focusLastWeight, onSetsChange, unilateral]);
 
   /**
    * Completion is the one action that starts rest, and only on the
@@ -85,26 +108,40 @@ export function ExerciseCard({
   const onToggleDone = useCallback(
     (setIndex: number) => {
       if (sets[setIndex]?.done) {
-        onSetsChange(reopen(sets, setIndex));
+        onSetsChange((previous) => reopen(previous, setIndex));
         return;
       }
-      const next = markDone(
-        sets,
-        setIndex,
-        { loadMode, unilateral },
-        Date.now(),
+      const mode = { loadMode, unilateral };
+      const now = Date.now();
+      if (!markDoneChanges(sets, setIndex, mode)) return;
+
+      // The updater is what the store applies; the locally computed copy is
+      // only used to name the set for the record check.
+      onSetsChange((previous) => markDone(previous, setIndex, mode, now));
+      const local = markDone(sets, setIndex, mode, now);
+      onSetComplete?.(
+        slotId,
+        local,
+        local[setIndex]?.setId,
+        movementId,
+        unilateral,
       );
-      if (next === sets) return;
-      onSetsChange(next);
-      onSetComplete?.();
     },
-    [loadMode, onSetComplete, onSetsChange, sets, unilateral],
+    [
+      loadMode,
+      movementId,
+      onSetComplete,
+      onSetsChange,
+      sets,
+      slotId,
+      unilateral,
+    ],
   );
 
   const onRepeatLast = useCallback(() => {
-    onSetsChange(repeatLast(sets, prior));
+    onSetsChange((previous) => repeatLast(previous, prior));
     focusLastWeight();
-  }, [focusLastWeight, onSetsChange, prior, sets]);
+  }, [focusLastWeight, onSetsChange, prior]);
 
   const commitName = (value: string) => {
     const next = value.trim();
@@ -199,8 +236,8 @@ export function ExerciseCard({
             }}
             loadMode={loadMode}
             onChange={(field: keyof SideEntry, value, side) =>
-              onSetsChange(
-                updateSet(sets, setIndex, field, value, side, {
+              onSetsChange((previous) =>
+                updateSet(previous, setIndex, field, value, side, {
                   loadMode,
                   unilateral,
                 }),
@@ -208,15 +245,19 @@ export function ExerciseCard({
             }
             onRemove={() => {
               weightInputs.current = [];
-              onSetsChange(removeSet(sets, setIndex, unilateral));
+              onSetsChange((previous) =>
+                removeSet(previous, setIndex, unilateral),
+              );
             }}
             onAdvance={addSet}
             onToggleDone={() => onToggleDone(setIndex)}
             onKindChange={(kind: SetKind) =>
-              onSetsChange(setSetKind(sets, setIndex, kind))
+              onSetsChange((previous) => setSetKind(previous, setIndex, kind))
             }
             onFailureChange={(reached: boolean) =>
-              onSetsChange(setReachedFailure(sets, setIndex, reached))
+              onSetsChange((previous) =>
+                setReachedFailure(previous, setIndex, reached),
+              )
             }
           />
         ))}

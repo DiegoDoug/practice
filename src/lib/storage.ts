@@ -165,6 +165,46 @@ export function downloadBlob(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
+// --- Celebrated records ---------------------------------------------------
+
+/**
+ * Which record celebrations have already been shown.
+ *
+ * Deliberately OUTSIDE WorkoutState, for the same reason the live timer is: it
+ * is interface memory, not training data, so it has no business in a backup and
+ * restoring someone else's backup must not tell you that you already saw their
+ * personal bests. Keeping it out also means it costs no schema version.
+ *
+ * Persisting it at all is what makes reopening a set and ticking it again
+ * silent: the key encodes the set AND the value, so genuinely improving the lift
+ * celebrates again while repeating it does not.
+ */
+export const CELEBRATED_KEY = 'weekly-practice-log/celebrated';
+
+/** Bounded so a long training history cannot grow this without limit. */
+const CELEBRATED_LIMIT = 500;
+
+export async function loadCelebrated(): Promise<string[]> {
+  if (!isBrowser()) return [];
+  try {
+    const stored = await get(CELEBRATED_KEY);
+    return Array.isArray(stored)
+      ? stored.filter((key): key is string => typeof key === 'string')
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveCelebrated(keys: string[]): Promise<void> {
+  if (!isBrowser()) return;
+  try {
+    await idbSet(CELEBRATED_KEY, keys.slice(-CELEBRATED_LIMIT));
+  } catch {
+    // Forgetting a celebration is harmless; failing the workout is not.
+  }
+}
+
 // --- Live session ---------------------------------------------------------
 
 /**

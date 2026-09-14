@@ -111,6 +111,39 @@ _Current records_ are derived and recomputed after any edit or deletion.
 A _PR event_ — the celebration — fires only when an eligible set is explicitly
 completed. It never fires retroactively from a migration or an edit.
 
+## Record celebrations
+
+A _record_ is derived from the logs on every read. A _celebration_ is the
+one-off announcement that a set just took a record, and it fires only from the
+explicit-completion path. Hydration, a backup restore, an import, and an
+ordinary edit all leave it silent, because none of them calls it.
+
+Celebrations are remembered so that repeating a lift does not congratulate you
+twice. That memory lives under its own storage key
+(`weekly-practice-log/celebrated`), deliberately outside `WorkoutState`:
+
+- it is interface memory, not training data, so it has no place in a backup;
+- restoring someone else's backup must not tell you that you have already seen
+  their personal bests;
+- keeping it out means it costs no schema version.
+
+It is best-effort. Both reads and writes swallow failure, and the whole check is
+guarded at the call site, so a blocked IndexedDB (private mode, cleared site
+data, a quota error) can lose a congratulation but never a logged set.
+
+Each key names a set **and** the value it achieved
+(`<setId>:<side>:<dimension>:<value>`). Two consequences follow:
+
+- Reopening a set and ticking it again is silent — same set, same value, same
+  key. Improving it changes the value on the dimensions that improved, so those
+  celebrate again while the unimproved ones stay quiet. Adding weight is not a
+  rep record.
+- **After a restore**, keys refer to set ids from the data that was replaced.
+  Restored sets carry their own ids from the backup, so old keys cannot suppress
+  a genuinely new set's record. Where a restore brings back the same id _and_
+  the same value — restoring your own backup — suppression is the correct
+  outcome: that lift was already celebrated.
+
 ## Units
 
 `state.unit` is a **display preference**. The unit each set was entered in is

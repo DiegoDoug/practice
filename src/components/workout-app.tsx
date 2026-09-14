@@ -9,10 +9,12 @@ import {
   History,
   ListChecks,
   Play,
+  TrendingUp,
 } from 'lucide-react';
 import { AppSkeleton } from './app-skeleton';
 import { BackupDialog } from './backup-dialog';
 import { CalendarDialog } from './calendar-dialog';
+import { ProgressDialog } from './progress-dialog';
 import { DayTabs } from './day-tabs';
 import { HistoryDialog } from './history-dialog';
 import { RoutineDialog } from './routine-dialog';
@@ -34,7 +36,9 @@ import {
   weekKey as currentWeekKey,
 } from '@/lib/week';
 import { addSessionExercise, resolveDayLink } from '@/lib/calendar';
-import type { SetEntry, WorkoutState } from '@/lib/types';
+import { celebrationKey, describeRecord, recordsBrokenBy } from '@/lib/records';
+import { useCelebrations } from '@/lib/use-celebrations';
+import { blankSet, type SetEntry, type WorkoutState } from '@/lib/types';
 import { withCompletion, withSets } from '@/lib/workout';
 import {
   ensureWeekDaySession,
@@ -75,9 +79,18 @@ const SAVE_LABEL = {
 export function WorkoutApp() {
   const router = useRouter();
   const params = useSearchParams();
-  const { state, hydrated, status, safeMode, update, replace, flush } =
-    useWorkoutStore();
+  const {
+    state,
+    hydrated,
+    status,
+    safeMode,
+    update,
+    latestState,
+    replace,
+    flush,
+  } = useWorkoutStore();
   const live = useLiveSession();
+  const celebrations = useCelebrations();
 
   // Resolved lazily on first render. The page renders the skeleton until the
   // store has hydrated, so this never reaches the server-rendered HTML and can
@@ -85,6 +98,7 @@ export function WorkoutApp() {
   const [weekKey, setWeekKey] = useState(currentWeekKey);
 
   const [calendarOpen, setCalendarOpen] = useState(false);
+  const [progressOpen, setProgressOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [backupOpen, setBackupOpen] = useState(false);
   const [routineOpen, setRoutineOpen] = useState(false);
@@ -206,7 +220,7 @@ export function WorkoutApp() {
   );
 
   const onSetsChange = useCallback(
-    (slotId: string, sets: SetEntry[]) => {
+    (slotId: string, apply: (previous: SetEntry[]) => SetEntry[]) => {
       if (!activeSession && !activeDay) return;
       update((previous) => {
         // Logging is the explicit act that creates a session for a routine day,
@@ -222,11 +236,15 @@ export function WorkoutApp() {
           withSession,
           withSession.sessions[sessionId],
         ).exercises.find((entry) => entry.slotId === slotId);
+        // The updater is applied here, against the sets as they stand in the
+        // state being written — not against a snapshot the card rendered with.
+        const existing = withSession.sessions[sessionId]?.exercises[slotId]
+          ?.sets ?? [blankSet(planned?.unilateral)];
         return withSets(
           withSession,
           sessionId,
           slotId,
-          sets,
+          apply(existing),
           planned?.movementId ?? 'unknown',
           planned?.unilateral,
           today,
@@ -351,13 +369,75 @@ export function WorkoutApp() {
    * session, a past workout being corrected, say, must not restart the timer
    * on the one actually in progress.
    */
-  const onSetComplete = useCallback(() => {
-    if (!live.session || isPaused(live.session)) return;
-    if (!activeSession || live.session.sessionId !== activeSession.sessionId) {
-      return;
-    }
-    live.startRest();
-  }, [activeSession, live]);
+  /**
+   * A set was explicitly ticked: start rest if a timer for THIS session is
+   * running, then check whether the completion took any records.
+   *
+   * The record check runs against a PROJECTION of the write that is landing —
+   * `state` does not yet contain it at this point — and never against a
+   * hydration or an import, because this is the only path that calls it. The
+   * celebration memory then filters anything already announced, so reopening a
+   * set and ticking it again is silent while genuinely improving it is not.
+   */
+  const onSetComplete = useCallback(
+    (
+      slotId: string,
+      sets: SetEntry[],
+      setId?: string,
+      movementId?: string,
+      unilateral?: boolean,
+    ) => {
+      if (live.session && !isPaused(live.session)) {
+        if (
+          activeSession &&
+          live.session.sessionId === activeSession.sessionId
+        ) {
+          live.startRest();
+        }
+      }
+
+      if (!setId || !movementId) return;
+
+      // A record is a nicety. Nothing in here may stop a set being logged, so
+      // the whole check is guarded: the write has already been dispatched by
+      // the caller before this runs.
+      try {
+        const today = toLocalDateKey(new Date());
+        // `latestState()`, not `state`: two completions dispatched from one
+        // event would otherwise both project from the same stale base, and the
+        // second would be judged without the first.
+        const current = latestState();
+        const target = writeTarget(current, today);
+        if (!target) return;
+
+        const projected = withSets(
+          target.state,
+          target.sessionId,
+          slotId,
+          sets,
+          movementId,
+          unilateral,
+          today,
+        );
+        const broken = recordsBrokenBy(projected, movementId, setId);
+        if (broken.length === 0) return;
+
+        const fresh = celebrations.claim(broken.map(celebrationKey));
+        const announce = broken.filter((record) =>
+          fresh.includes(celebrationKey(record)),
+        );
+        if (announce.length === 0) return;
+        setAnnouncement(
+          `New record! ${announce
+            .map((record) => describeRecord(record, current.unit))
+            .join(' \u00b7 ')}`,
+        );
+      } catch {
+        // Storage or computation trouble loses a congratulation, never a set.
+      }
+    },
+    [activeSession, celebrations, latestState, live, writeTarget],
+  );
 
   const onStartWorkout = useCallback(() => {
     if (!activeSession && !activeDay) return;
@@ -507,6 +587,14 @@ export function WorkoutApp() {
           >
             <CalendarDays className="h-4 w-4" aria-hidden="true" />
             Calendar
+          </button>
+          <button
+            type="button"
+            onClick={() => setProgressOpen(true)}
+            className="rounded-control border-hairline bg-card text-ocean-deep hover:bg-mist-soft inline-flex min-h-11 items-center gap-1.5 border px-3 text-[13px] font-semibold transition-colors duration-150"
+          >
+            <TrendingUp className="h-4 w-4" aria-hidden="true" />
+            Progress
           </button>
           <button
             type="button"
@@ -722,6 +810,12 @@ export function WorkoutApp() {
         target={substituting}
         onSubstitute={onSubstitute}
         onCreateMovement={onCreateMovement}
+      />
+      <ProgressDialog
+        open={progressOpen}
+        onClose={() => setProgressOpen(false)}
+        state={state}
+        today={toLocalDateKey(new Date())}
       />
       <CalendarDialog
         open={calendarOpen}
