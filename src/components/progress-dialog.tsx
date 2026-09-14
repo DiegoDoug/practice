@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import { Dialog } from './dialog';
 import { MovementPicker } from './movement-picker';
 import { SideComparison } from './side-comparison';
+import { GoalsPanel } from './goals-panel';
 import {
   eligibleSets,
   loggedMovementIds,
@@ -26,9 +27,11 @@ type ProgressDialogProps = {
   onClose: () => void;
   state: WorkoutState;
   today: string;
+  /** Updater-based, so the goal edits below cannot clobber a queued write. */
+  onUpdate: (updater: (previous: WorkoutState) => WorkoutState) => void;
 };
 
-type Tab = 'exercise' | 'sides';
+type Tab = 'exercise' | 'sides' | 'goals';
 
 const PERIODS: { value: HistoryPeriod; label: string }[] = [
   { value: '4w', label: '4 weeks' },
@@ -58,6 +61,7 @@ export function ProgressDialog({
   onClose,
   state,
   today,
+  onUpdate,
 }: ProgressDialogProps) {
   const [tab, setTab] = useState<Tab>('exercise');
   const [movementId, setMovementId] = useState<string | null>(null);
@@ -130,9 +134,20 @@ export function ProgressDialog({
         >
           Left vs right
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'goals'}
+          onClick={() => setTab('goals')}
+          className={tabClass(tab === 'goals')}
+        >
+          Goals
+        </button>
       </div>
 
-      {tab === 'sides' ? (
+      {tab === 'goals' ? (
+        <GoalsPanel state={state} today={today} onUpdate={onUpdate} />
+      ) : tab === 'sides' ? (
         <SideComparison state={state} />
       ) : !movementId ? (
         <>

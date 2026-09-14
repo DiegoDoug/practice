@@ -816,6 +816,7 @@ export function WorkoutApp() {
         onClose={() => setProgressOpen(false)}
         state={state}
         today={toLocalDateKey(new Date())}
+        onUpdate={update}
       />
       <CalendarDialog
         open={calendarOpen}

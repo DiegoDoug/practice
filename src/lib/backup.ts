@@ -232,6 +232,7 @@ const goalSchema = z.object({
   targetWeight: z.number(),
   targetReps: z.number(),
   unit: z.enum(['lb', 'kg']),
+  mode: z.enum(['external', 'bodyweight']).optional(),
   side: z.enum(['left', 'right']).optional(),
   createdAt: z.string(),
   archived: z.boolean().optional(),

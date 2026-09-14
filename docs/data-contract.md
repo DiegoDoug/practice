@@ -198,9 +198,30 @@ counted as zero.
 ## Goals
 
 A goal is satisfied only by a **single set** meeting target weight and target
-reps together, performed **on or after** the goal's `createdAt`. Pre-existing
-history does not retroactively complete a goal, and a heavy low-rep set plus a
-lighter high-rep set never jointly satisfy one.
+reps together. A heavy low-rep set plus a lighter high-rep set never jointly
+satisfy one.
+
+**Existing history counts.** An earlier draft of this contract required the
+qualifying set to fall on or after the goal's `createdAt`; it no longer does,
+because a goal is a statement about a lift, not about a date, and telling an
+athlete they have not done something already in their log is simply wrong.
+A goal met by earlier history reads as achieved from the moment it is created
+and is flagged `alreadyAchievedWhenCreated`, so the UI can say "already
+achieved" rather than implying it was earned since. An **undated** legacy set
+counts as pre-existing: it came from an older document, and dating it after the
+goal would be a guess.
+
+Achievement is **derived** from the logs, never stored. Reopening, editing or
+deleting the qualifying set — or raising the target — changes the answer on the
+next read, so no stale flag can survive a correction. Archiving a goal retires
+it without touching the history that met it.
+
+Goals reuse the record eligibility rules: completed **working** sets only, so a
+warmup or a drop set cannot complete a goal. Loads are compared by physical
+magnitude, so a target set in kilos can be met by a set logged in pounds; the
+display preference is not consulted. A goal stores the logging `mode` it was
+set under, so a later library edit cannot turn a bodyweight goal into an
+unreachable loaded one.
 
 Progress is reported on both dimensions — best weight at the target reps, best
 reps at the target weight — rather than one percentage that would hide which
