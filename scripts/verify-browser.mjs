@@ -29,11 +29,10 @@ const APP_LIVE_REGION = 'p.sr-only[role="status"][aria-live="polite"]';
 /**
  * The Monday of the current training week, as a local date key.
  *
- * Fixtures that correct a "performed" date must land inside the week the run
- * happens in: a hard-coded date silently drifts into the previous week once the
- * calendar rolls past it, which changes how many sessions the current week
- * holds and breaks assertions that have nothing to do with dates. Monday is
- * always on or before today, so it is never a workout performed in the future.
+ * A hard-coded date drifts into the previous week as soon as the calendar
+ * rolls past it, which changes how many sessions the current week holds and
+ * breaks assertions that have nothing to do with dates. Monday is always on or
+ * before today, so it is never a workout performed in the future.
  */
 const weekStart = () => {
   const now = new Date();
@@ -1257,12 +1256,7 @@ try {
   // Asserted against the stored celebration keys rather than the live region:
   // the region keeps whatever was last announced, so it cannot distinguish
   // "nothing new was announced" from "the old text is still sitting there".
-  /**
-   * The persisted document, so a step can wait for a typed value to have been
-   * SAVED rather than sleeping and hoping. The store debounces its writes, so a
-   * fixed timeout is a race: on a loaded machine the write lands after the next
-   * click, and the click is then judged against a state missing what was typed.
-   */
+  /** The persisted document, for asserting what actually reached storage. */
   const storedState = () =>
     page.evaluate(
       async () =>
@@ -1290,11 +1284,9 @@ try {
   /**
    * Poll until the saved sets satisfy `predicate`, or give up loudly.
    *
-   * Reads the parsed rows rather than matching the serialised document: a regex
-   * over JSON silently depends on key order and on which optional fields happen
-   * to be present, so it can fail for reasons unrelated to what is being waited
-   * for. The budget is generous because the store debounces and this machine
-   * also builds; a slow save is not the thing under test.
+   * Waiting for the condition rather than for a fixed span keeps a slow save
+   * from being reported as a lost one, while still failing if the write never
+   * lands — which is the thing under test.
    */
   const waitForStored = async (predicate, label) => {
     for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -1404,27 +1396,76 @@ try {
     'both rapid-completion sets',
   );
 
-  const beforeRapid = await celebrated();
-  // Heavier first, then lighter, with no wait between: the lighter set must not
-  // be judged against a state that is missing the heavier one.
-  await Promise.all([
-    page.getByRole('button', { name: `Complete ${prExercise} set 2` }).click(),
-    page.getByRole('button', { name: `Complete ${prExercise} set 3` }).click(),
-  ]);
-  // Wait for BOTH completions to be saved before reading anything back. The
-  // store debounces its writes, so a fixed pause is generous on an idle machine
-  // and a coin flip on a loaded one — and when it loses, the symptom looks
-  // exactly like a lost update: the rows read as unfinished and the heavier set
-  // holds no record. It is only a premature read.
+  // Both rows must be saved before either is ticked: the subject is two
+  // completions racing each other, not a completion racing a pending save.
   await waitForStored(
     (sets) =>
-      sets.some((set) => set.weight === '405' && set.done === true) &&
-      sets.some((set) => set.weight === '135' && set.done === true),
-    'both rapid completions',
+      sets.some((set) => set.weight === '405') &&
+      sets.some((set) => set.weight === '135'),
+    'both rapid-completion sets',
   );
 
-  // Then wait for the celebration store to actually change, for the same
-  // reason: the record check runs off that debounced write too.
+  const beforeRapid = await celebrated();
+
+  /**
+   * Invoke both real completion buttons from ONE in-page JavaScript task.
+   *
+   * Two concurrent Playwright pointer clicks do not test this: completing the
+   * first set makes the rest-timer bar appear and shifts the layout, so the
+   * second click is delivered where its button no longer is. Playwright counts
+   * that as dispatched, and the run reads as a lost write — a hit-testing race
+   * in the instrument, which an in-page listener confirmed by recording only
+   * one click event in a failing run.
+   *
+   * Calling the buttons directly removes the pointer path while keeping the
+   * collision real, and makes it stronger: neither handler can observe a render
+   * caused by the other. The buttons are the ones a user presses, found by the
+   * accessible name a screen reader would read from their sr-only label.
+   */
+  const dispatch = await page.evaluate(
+    ([heavier, lighter]) => {
+      const byName = (name) =>
+        [...document.querySelectorAll('button')].find((button) =>
+          (button.textContent || '').trim().endsWith(name),
+        );
+      const first = byName(heavier);
+      const second = byName(lighter);
+      if (!first || !second) {
+        return { found: false, disabled: null, clicked: 0 };
+      }
+      if (first.disabled || second.disabled) {
+        return { found: true, disabled: true, clicked: 0 };
+      }
+      // Heavier first, then lighter, with nothing between them: the lighter set
+      // must not be judged against a state that is missing the heavier one.
+      first.click();
+      second.click();
+      return { found: true, disabled: false, clicked: 2 };
+    },
+    [`Complete ${prExercise} set 2`, `Complete ${prExercise} set 3`],
+  );
+  ok(
+    'both completion handlers are invoked in one task',
+    dispatch.found && dispatch.disabled === false && dispatch.clicked === 2,
+    JSON.stringify(dispatch),
+  );
+
+  // Both completions must reach storage — the assertion the whole scenario
+  // exists for, unchanged in strength.
+  const bothStored = (sets) =>
+    sets.some((set) => set.weight === '405' && set.done === true) &&
+    sets.some((set) => set.weight === '135' && set.done === true);
+  await waitForStored(bothStored, 'both rapid completions');
+  ok(
+    'both rapid completions reach storage',
+    bothStored(storedSets(await storedState())),
+    JSON.stringify(
+      storedSets(await storedState())
+        .filter((set) => set.weight === '405' || set.weight === '135')
+        .map((set) => `${set.weight}:${set.done ? 'done' : 'UNFINISHED'}`),
+    ),
+  );
+
   let afterRapid = await celebrated();
   for (let attempt = 0; attempt < 60; attempt += 1) {
     if (afterRapid.length > beforeRapid.length) break;
@@ -1456,6 +1497,20 @@ try {
         .locator('[data-set-done="true"]')
         .count(),
     ),
+  );
+
+  // And they survive the round trip through storage, which is what the athlete
+  // actually depends on: what they ticked is still ticked when they come back.
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForTimeout(800);
+  const reopenCount = async (setNumber) =>
+    await page
+      .getByRole('button', { name: `Reopen ${prExercise} set ${setNumber}` })
+      .count();
+  ok(
+    'both rapid completions survive a reload',
+    (await reopenCount(2)) === 1 && (await reopenCount(3)) === 1,
+    `set2=${await reopenCount(2)} set3=${await reopenCount(3)}`,
   );
 
   // Reloading must not celebrate anything on hydration.
