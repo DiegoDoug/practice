@@ -26,6 +26,26 @@ const ok = (n, c, d = '') => {
  */
 const APP_LIVE_REGION = 'p.sr-only[role="status"][aria-live="polite"]';
 
+/**
+ * The Monday of the current training week, as a local date key.
+ *
+ * Fixtures that correct a "performed" date must land inside the week the run
+ * happens in: a hard-coded date silently drifts into the previous week once the
+ * calendar rolls past it, which changes how many sessions the current week
+ * holds and breaks assertions that have nothing to do with dates. Monday is
+ * always on or before today, so it is never a workout performed in the future.
+ */
+const weekStart = () => {
+  const now = new Date();
+  const monday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() - ((now.getDay() + 6) % 7),
+  );
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${monday.getFullYear()}-${pad(monday.getMonth() + 1)}-${pad(monday.getDate())}`;
+};
+
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || '/opt/pw-browsers/chromium',
 });
@@ -1054,7 +1074,7 @@ try {
     .locator('[role="dialog"] input[type="date"]')
     .nth(1);
   const calPlanned = await planInput.inputValue();
-  await trainedInput.fill('2026-09-11');
+  await trainedInput.fill(weekStart());
   await page.waitForTimeout(400);
   ok(
     'correcting the trained date leaves the plan alone',
@@ -1237,6 +1257,41 @@ try {
   // Asserted against the stored celebration keys rather than the live region:
   // the region keeps whatever was last announced, so it cannot distinguish
   // "nothing new was announced" from "the old text is still sitting there".
+  /**
+   * The persisted document, so a step can wait for a typed value to have been
+   * SAVED rather than sleeping and hoping. The store debounces its writes, so a
+   * fixed timeout is a race: on a loaded machine the write lands after the next
+   * click, and the click is then judged against a state missing what was typed.
+   */
+  const storedState = () =>
+    page.evaluate(
+      async () =>
+        await new Promise((res) => {
+          const open = indexedDB.open('keyval-store', 1);
+          open.onupgradeneeded = () => open.result.createObjectStore('keyval');
+          open.onsuccess = () => {
+            const r = open.result
+              .transaction('keyval', 'readonly')
+              .objectStore('keyval')
+              .get('weekly-practice-log/state');
+            r.onsuccess = () => res(r.result ?? null);
+            r.onerror = () => res(null);
+          };
+          open.onerror = () => res(null);
+        }),
+    );
+
+  /** Poll until the saved document satisfies `predicate`, or give up loudly. */
+  const waitForStored = async (predicate, label) => {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const stored = await storedState();
+      if (stored && predicate(JSON.stringify(stored))) return true;
+      await page.waitForTimeout(150);
+    }
+    ok(`stored state settled: ${label}`, false, 'timed out waiting for a save');
+    return false;
+  };
+
   const celebrated = () =>
     page.evaluate(
       async () =>
@@ -1326,7 +1381,13 @@ try {
   await page.waitForTimeout(500);
   await page.getByLabel(`${prExercise} set 3 weight`).fill('135');
   await page.getByLabel(`${prExercise} set 3 reps`).fill('2');
-  await page.waitForTimeout(600);
+  // Both rows must be saved before either is ticked: the point of the check is
+  // two completions racing each other, not a completion racing a pending save.
+  await waitForStored(
+    (json) =>
+      json.includes('"weight":"405"') && json.includes('"weight":"135"'),
+    'both rapid-completion sets',
+  );
 
   const beforeRapid = await celebrated();
   // Heavier first, then lighter, with no wait between: the lighter set must not
@@ -1635,6 +1696,8 @@ try {
     .first()
     .click();
   await page.waitForTimeout(400);
+  await page.getByLabel('Show archived goals').uncheck();
+  await page.waitForTimeout(300);
   await page
     .getByRole('button', { name: /^Delete/ })
     .first()
@@ -1645,23 +1708,28 @@ try {
     (await goalsText()).includes('No active goals'),
     (await goalsText()).slice(0, 140),
   );
-  await page.keyboard.press('Escape');
-  await page.waitForTimeout(250);
-  await page.goto(`${BASE}/?day=day1`, { waitUntil: 'networkidle' });
+
+  // Setting the same goal again proves the history behind it is still there:
+  // it can only read as achieved by re-reading the very sets that met it.
+  await page.getByRole('button', { name: 'New goal' }).click();
+  await page.waitForTimeout(300);
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('button', { name: new RegExp(prExercise) })
+    .first()
+    .click();
+  await page.waitForTimeout(300);
+  await page.getByLabel('Target weight').fill('300');
+  await page.getByLabel('Target reps').fill('5');
+  await page.getByRole('button', { name: 'Add goal' }).click();
   await page.waitForTimeout(600);
-  if ((await page.locator('main').innerText()).includes('Which session?')) {
-    await page
-      .locator('main')
-      .getByRole('button', { name: /Day 1|Extra workout/ })
-      .first()
-      .click();
-    await page.waitForTimeout(600);
-  }
   ok(
     'the sets that met the goal are untouched by deleting it',
-    (await page.getByLabel(`${prExercise} set 1 weight`).inputValue()) ===
-      '315',
+    (await goalsText()).includes('Achieved'),
+    (await goalsText()).slice(0, 140),
   );
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(250);
 
   // ---------- Timer isolation between sessions ----------
   const liveTimer = () =>
