@@ -1281,11 +1281,25 @@ try {
         }),
     );
 
-  /** Poll until the saved document satisfies `predicate`, or give up loudly. */
+  /** Every logged set in the saved document, across all sessions and slots. */
+  const storedSets = (stored) =>
+    Object.values(stored?.sessions ?? {}).flatMap((session) =>
+      Object.values(session.exercises ?? {}).flatMap((log) => log.sets ?? []),
+    );
+
+  /**
+   * Poll until the saved sets satisfy `predicate`, or give up loudly.
+   *
+   * Reads the parsed rows rather than matching the serialised document: a regex
+   * over JSON silently depends on key order and on which optional fields happen
+   * to be present, so it can fail for reasons unrelated to what is being waited
+   * for. The budget is generous because the store debounces and this machine
+   * also builds; a slow save is not the thing under test.
+   */
   const waitForStored = async (predicate, label) => {
-    for (let attempt = 0; attempt < 40; attempt += 1) {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
       const stored = await storedState();
-      if (stored && predicate(JSON.stringify(stored))) return true;
+      if (stored && predicate(storedSets(stored))) return true;
       await page.waitForTimeout(150);
     }
     ok(`stored state settled: ${label}`, false, 'timed out waiting for a save');
@@ -1384,8 +1398,9 @@ try {
   // Both rows must be saved before either is ticked: the point of the check is
   // two completions racing each other, not a completion racing a pending save.
   await waitForStored(
-    (json) =>
-      json.includes('"weight":"405"') && json.includes('"weight":"135"'),
+    (sets) =>
+      sets.some((set) => set.weight === '405') &&
+      sets.some((set) => set.weight === '135'),
     'both rapid-completion sets',
   );
 
@@ -1396,8 +1411,26 @@ try {
     page.getByRole('button', { name: `Complete ${prExercise} set 2` }).click(),
     page.getByRole('button', { name: `Complete ${prExercise} set 3` }).click(),
   ]);
-  await page.waitForTimeout(1200);
-  const afterRapid = await celebrated();
+  // Wait for BOTH completions to be saved before reading anything back. The
+  // store debounces its writes, so a fixed pause is generous on an idle machine
+  // and a coin flip on a loaded one — and when it loses, the symptom looks
+  // exactly like a lost update: the rows read as unfinished and the heavier set
+  // holds no record. It is only a premature read.
+  await waitForStored(
+    (sets) =>
+      sets.some((set) => set.weight === '405' && set.done === true) &&
+      sets.some((set) => set.weight === '135' && set.done === true),
+    'both rapid completions',
+  );
+
+  // Then wait for the celebration store to actually change, for the same
+  // reason: the record check runs off that debounced write too.
+  let afterRapid = await celebrated();
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    if (afterRapid.length > beforeRapid.length) break;
+    await page.waitForTimeout(150);
+    afterRapid = await celebrated();
+  }
   const rapidKeys = afterRapid.filter((key) => !beforeRapid.includes(key));
   ok(
     'the heavier of two rapid completions takes the weight record',
@@ -1589,6 +1622,15 @@ try {
     (await goalsText()).slice(0, 160),
   );
   ok(
+    'a same-day achievement says the order is unknown, not that it was earned since',
+    (await goalsText()).includes('there is no record of which came first'),
+    (await goalsText()).slice(-260),
+  );
+  ok(
+    'and it does not claim the goal was already achieved beforehand',
+    !(await goalsText()).includes('Already achieved'),
+  );
+  ok(
     'both dimensions are reported, with no blended percentage',
     (await goalsText()).includes('Best weight at 5+ reps') &&
       (await goalsText()).includes('Best reps at 300 lb+') &&
@@ -1690,6 +1732,64 @@ try {
     (await goalsText()).slice(0, 140),
   );
 
+  // The stored mode must survive an edit: it is what keeps a goal readable
+  // after the movement library changes underneath it.
+  const storedGoalModes = async () => {
+    const stored = await storedState();
+    return Object.values(stored?.goals ?? {}).map((g) => g.mode);
+  };
+  const modesBeforeEdit = await storedGoalModes();
+  ok(
+    'a goal stores the mode it was set under',
+    modesBeforeEdit.length > 0 && modesBeforeEdit.every(Boolean),
+    JSON.stringify(modesBeforeEdit),
+  );
+  await page.getByRole('button', { name: /^Edit/ }).first().click();
+  await page.waitForTimeout(300);
+  await page.getByLabel('Target reps').fill('4');
+  await page.getByRole('button', { name: 'Save goal' }).click();
+  await page.waitForTimeout(600);
+  ok(
+    'editing a target does not restamp the stored mode',
+    JSON.stringify(await storedGoalModes()) === JSON.stringify(modesBeforeEdit),
+    JSON.stringify(await storedGoalModes()),
+  );
+  await page.getByRole('button', { name: /^Edit/ }).first().click();
+  await page.waitForTimeout(300);
+  await page.getByLabel('Target reps').fill('5');
+  await page.getByRole('button', { name: 'Save goal' }).click();
+  await page.waitForTimeout(600);
+
+  // A unilateral movement has no combined measurement, so a bilateral target
+  // for it could never be met. The form must not offer one.
+  await page.getByRole('button', { name: 'New goal' }).click();
+  await page.waitForTimeout(300);
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('button', { name: /Bulgarian Split Squat/ })
+    .first()
+    .click();
+  await page.waitForTimeout(400);
+  const sideSelect = page.getByLabel('Applies to');
+  ok(
+    'a unilateral goal defaults to one side, not to both',
+    (await sideSelect.inputValue()) === 'left',
+    await sideSelect.inputValue(),
+  );
+  ok(
+    'and an unreachable combined target is not offered at all',
+    (await sideSelect.locator('option[value="bilateral"]').count()) === 0,
+    String(await sideSelect.locator('option').count()),
+  );
+  ok(
+    'the form explains why the goal is one-sided',
+    (await page.textContent('[role="dialog"]')).includes(
+      'trained one side at a time',
+    ),
+  );
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.waitForTimeout(300);
+
   // Deleting removes the goal and leaves the logged sets alone.
   await page
     .getByRole('button', { name: /^Restore/ })
@@ -1727,6 +1827,49 @@ try {
     'the sets that met the goal are untouched by deleting it',
     (await goalsText()).includes('Achieved'),
     (await goalsText()).slice(0, 140),
+  );
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(250);
+
+  // A malformed goal fails the whole import rather than being dropped: the
+  // athlete would otherwise believe a goal had been restored when it had not.
+  await page.getByRole('button', { name: 'Backup' }).first().click();
+  await page.waitForSelector('[role="dialog"]');
+  const badGoalPath = file('bad-goal.json');
+  fs.writeFileSync(
+    badGoalPath,
+    JSON.stringify({
+      schemaVersion: 5,
+      unit: 'lb',
+      sessions: {},
+      routine: [],
+      movements: {},
+      goals: {
+        g1: {
+          goalId: 'g1',
+          movementId: 'barbell-bench-press',
+          targetWeight: 100,
+          targetReps: 0,
+          unit: 'kg',
+          createdAt: '2026-01-01',
+        },
+      },
+    }),
+  );
+  await page.setInputFiles('input[type="file"]', badGoalPath);
+  await page.waitForTimeout(500);
+  const badGoalMsg = await page
+    .locator('[role="dialog"] [role="status"]')
+    .innerText();
+  ok(
+    'a backup carrying an impossible goal is rejected',
+    badGoalMsg.toLowerCase().includes('not valid'),
+    badGoalMsg,
+  );
+  ok(
+    'and the rejection leaves local data untouched',
+    badGoalMsg.includes('has not been changed'),
+    badGoalMsg,
   );
   await page.keyboard.press('Escape');
   await page.waitForTimeout(250);

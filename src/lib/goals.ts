@@ -34,6 +34,9 @@ export type GoalInput = {
   mode?: LoadMode;
 };
 
+/** Where a qualifying set sits relative to the goal's creation date. */
+export type AchievementTiming = 'before' | 'after' | 'unknown';
+
 export type GoalProgress = {
   goal: Goal;
   achieved: boolean;
@@ -42,11 +45,16 @@ export type GoalProgress = {
   /** Its date, or null when the document never recorded one. */
   achievedOn: string | null;
   /**
-   * Whether the qualifying set predates the goal. An undated legacy set counts
-   * as pre-existing: it is history from an older document, and claiming it
-   * happened after the goal was set would be a guess.
+   * When the qualifying set happened relative to the goal being set, or null
+   * when the goal is unmet.
+   *
+   * `'unknown'` is the honest answer for a set performed on the SAME day the
+   * goal was created. Neither side records a time of day — a goal carries a
+   * local date, and a set carries `doneAt` only when it was ticked in this app
+   * — so resolving the order would mean manufacturing a timestamp. An undated
+   * legacy set is `'before'`: it came from an older document.
    */
-  alreadyAchievedWhenCreated: boolean;
+  achievedRelativeToGoal: AchievementTiming | null;
   /** The heaviest load carried for at least the target reps. */
   bestWeightAtTargetReps: EligibleSet | null;
   /** The most reps done at or above the target load. */
@@ -69,6 +77,24 @@ export const goalLoadMode = (state: WorkoutState, goal: Goal): LoadMode =>
   goal.mode ??
   loadModeFor(state.movements[goal.movementId]?.equipment ?? 'other');
 
+/**
+ * Classify a qualifying set against the goal's creation date.
+ *
+ * Same-day is `'unknown'`, not `'after'`: the set may well have been performed
+ * that morning and the goal written that evening. Guessing either way would be
+ * a claim the document does not support.
+ */
+const timingOf = (
+  row: EligibleSet | null,
+  goal: Goal,
+): AchievementTiming | null => {
+  if (row === null) return null;
+  if (!row.dateKnown || row.date === null) return 'before';
+  if (row.date < goal.createdAt) return 'before';
+  if (row.date > goal.createdAt) return 'after';
+  return 'unknown';
+};
+
 const meetsWeight = (row: EligibleSet, goal: Goal): boolean =>
   compareLoads(row.load, { value: goal.targetWeight, unit: goal.unit }) >= 0;
 
@@ -83,6 +109,9 @@ export function goalProgress(state: WorkoutState, goal: Goal): GoalProgress {
   const rows = eligibleSets(state, {
     movementId: goal.movementId,
     recordOnly: true,
+    // The mode the goal was SET under decides how its rows read, so a later
+    // library edit cannot make a reps-only goal unreachable.
+    loadMode: goalLoadMode(state, goal),
   }).filter((row) => row.side === goalSide(goal));
 
   // `eligibleSets` is chronological, so the first match is the earliest.
@@ -116,13 +145,7 @@ export function goalProgress(state: WorkoutState, goal: Goal): GoalProgress {
     achieved: achievedBy !== null,
     achievedBy,
     achievedOn: achievedBy?.dateKnown ? achievedBy.date : null,
-    alreadyAchievedWhenCreated:
-      achievedBy !== null &&
-      !(
-        achievedBy.dateKnown &&
-        achievedBy.date !== null &&
-        achievedBy.date >= goal.createdAt
-      ),
+    achievedRelativeToGoal: timingOf(achievedBy, goal),
     bestWeightAtTargetReps,
     bestRepsAtTargetWeight,
   };
@@ -201,6 +224,13 @@ export function updateGoal(
   const next: Goal = { ...existing, ...patch };
   // An explicit `side: undefined` in the patch means "make this bilateral".
   if ('side' in patch && patch.side === undefined) delete next.side;
+  // `mode: undefined` does NOT mean "forget the mode". The stored mode is what
+  // keeps evaluation stable against library edits, so it is only ever replaced
+  // by a mode the caller actually names.
+  if (patch.mode === undefined) {
+    if (existing.mode === undefined) delete next.mode;
+    else next.mode = existing.mode;
+  }
   return { ...state, goals: { ...state.goals, [goalId]: next } };
 }
 

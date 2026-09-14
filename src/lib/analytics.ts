@@ -92,6 +92,17 @@ export type EligibleOptions = {
   recordOnly?: boolean;
   period?: HistoryPeriod;
   today?: string;
+  /**
+   * Read every row under THIS logging mode instead of the session snapshot's
+   * or the library's.
+   *
+   * A goal stores the mode it was set under, and that stored mode has to stay
+   * authoritative: if the library is later edited to call a bodyweight movement
+   * a loaded one, a blank weight would stop reading as zero added load and a
+   * reps-only goal would become permanently unreachable. Overriding here keeps
+   * the decision in one place rather than reinterpreting rows afterwards.
+   */
+  loadMode?: LoadMode;
 };
 
 /**
@@ -103,7 +114,13 @@ export function eligibleSets(
   state: WorkoutState,
   options: EligibleOptions = {},
 ): EligibleSet[] {
-  const { movementId, recordOnly, period = 'all', today } = options;
+  const {
+    movementId,
+    recordOnly,
+    period = 'all',
+    today,
+    loadMode: loadModeOverride,
+  } = options;
   const rows: EligibleSet[] = [];
   let order = 0;
 
@@ -136,6 +153,7 @@ export function eligibleSets(
         (entry) => entry.slotId === slotId,
       );
       const loadMode: LoadMode =
+        loadModeOverride ??
         snapshotEntry?.loadMode ??
         loadModeFor(state.movements[log.movementId]?.equipment ?? 'other');
       const unit = log.unit ?? state.unit;

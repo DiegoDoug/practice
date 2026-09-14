@@ -54,22 +54,35 @@ function statusLine(progress: GoalProgress): {
   if (!progress.achieved) {
     return { label: 'Not yet', detail: '', tone: 'open' };
   }
-  if (progress.alreadyAchievedWhenCreated) {
-    return {
-      label: 'Already achieved',
-      detail: progress.achievedOn
-        ? `You had already done this on ${formatWeekLabel(progress.achievedOn)}, before setting the goal.`
-        : 'You had already done this in an older, undated workout.',
-      tone: 'done',
-    };
+  const on = progress.achievedOn ? formatWeekLabel(progress.achievedOn) : null;
+  switch (progress.achievedRelativeToGoal) {
+    case 'before':
+      return {
+        label: 'Already achieved',
+        detail: on
+          ? `You had already done this on ${on}, before setting the goal.`
+          : 'You had already done this in an older, undated workout.',
+        tone: 'done',
+      };
+    case 'unknown':
+      // Same day as the goal. Neither the goal nor the set records a time of
+      // day, so the honest answer is that the order is unknown.
+      return {
+        label: 'Achieved',
+        detail: on
+          ? `Done on ${on}, the same day you set this goal — there is no record of which came first.`
+          : 'Done the same day you set this goal.',
+        tone: 'done',
+      };
+    default:
+      return {
+        label: 'Achieved',
+        detail: on
+          ? `First done on ${on}.`
+          : 'First done in an undated workout.',
+        tone: 'done',
+      };
   }
-  return {
-    label: 'Achieved',
-    detail: progress.achievedOn
-      ? `First done on ${formatWeekLabel(progress.achievedOn)}.`
-      : 'First done in an undated workout.',
-    tone: 'done',
-  };
 }
 
 export function GoalsPanel({ state, today, onUpdate }: GoalsPanelProps) {
@@ -86,6 +99,15 @@ export function GoalsPanel({ state, today, onUpdate }: GoalsPanelProps) {
   const modeOf = (movementId: string) =>
     loadModeFor(state.movements[movementId]?.equipment ?? 'other');
 
+  /**
+   * A unilateral movement produces left and right measurements and no combined
+   * one, so a bilateral target for it could never be met. The form defaults
+   * such a goal to a side and does not offer "Both sides": presenting an
+   * unreachable target as a choice is a trap, not a choice.
+   */
+  const isUnilateral = (movementId: string) =>
+    state.movements[movementId]?.unilateral === true;
+
   const beginDraft = (movementId: string) => {
     setPicking(false);
     setEditing(null);
@@ -94,7 +116,7 @@ export function GoalsPanel({ state, today, onUpdate }: GoalsPanelProps) {
       weight: modeOf(movementId) === 'bodyweight' ? '0' : '',
       reps: '5',
       unit: state.unit,
-      side: 'bilateral',
+      side: isUnilateral(movementId) ? 'left' : 'bilateral',
     });
   };
 
@@ -138,7 +160,12 @@ export function GoalsPanel({ state, today, onUpdate }: GoalsPanelProps) {
             targetReps: parsed.reps as number,
             unit: draft.unit,
             side,
-            mode: modeOf(draft.movementId),
+            // Only a genuine change of exercise re-reads the mode from the
+            // library. Editing a target must never restamp the mode the goal
+            // was set under; that stored mode is what keeps evaluation stable.
+            ...(draft.movementId === previous.goals?.[goalId]?.movementId
+              ? {}
+              : { mode: modeOf(draft.movementId) }),
           })
         : createGoal(
             previous,
@@ -244,12 +271,21 @@ export function GoalsPanel({ state, today, onUpdate }: GoalsPanelProps) {
               }
               className={`${field} px-2`}
             >
-              <option value="bilateral">Both sides</option>
+              {!isUnilateral(draft.movementId) || draft.side === 'bilateral' ? (
+                <option value="bilateral">Both sides</option>
+              ) : null}
               <option value="left">Left side</option>
               <option value="right">Right side</option>
             </select>
           </label>
         </div>
+        {isUnilateral(draft.movementId) ? (
+          <p className="text-muted mt-2 text-[12px]">
+            This exercise is trained one side at a time, so the goal applies to
+            one side. The two are never added together, and a combined target
+            could not be met.
+          </p>
+        ) : null}
         <p className="text-muted mt-2 text-[12px]">
           One working set must meet both targets at once. A heavy triple plus a
           lighter set of eight is not a heavy set of eight.

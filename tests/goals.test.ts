@@ -243,7 +243,7 @@ describe('history already on record counts', () => {
     expect(progress.achievedBy?.sessionId).toBe('old');
     // …and says plainly that it was already done, rather than implying the
     // athlete achieved it since setting the goal.
-    expect(progress.alreadyAchievedWhenCreated).toBe(true);
+    expect(progress.achievedRelativeToGoal).toBe('before');
     expect(progress.achievedOn).toBe('2025-11-04');
   });
 
@@ -253,7 +253,7 @@ describe('history already on record counts', () => {
     );
     const progress = goalProgress(state, goal({ createdAt: '2026-01-01' }));
     expect(progress.achieved).toBe(true);
-    expect(progress.alreadyAchievedWhenCreated).toBe(false);
+    expect(progress.achievedRelativeToGoal).toBe('after');
   });
 
   it('credits the earliest qualifying set, so the date does not drift', () => {
@@ -276,7 +276,7 @@ describe('history already on record counts', () => {
     });
     const progress = goalProgress(state, goal());
     expect(progress.achieved).toBe(true);
-    expect(progress.alreadyAchievedWhenCreated).toBe(true);
+    expect(progress.achievedRelativeToGoal).toBe('before');
     expect(progress.achievedOn).toBeNull();
   });
 });
@@ -538,5 +538,187 @@ describe('goals survive a backup round trip', () => {
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect(parsed.state.goals).toBeUndefined();
+  });
+});
+
+describe('a same-day achievement is not classified as either', () => {
+  // Neither side of the comparison records a time: a goal carries a local DATE
+  // and a completed set carries `doneAt` only when it was ticked in this app.
+  // Claiming an order would mean inventing one, so the day the goal was set is
+  // reported as unknown rather than resolved by a manufactured timestamp.
+  const sameDay = () =>
+    stateWith(
+      logged('a', '2026-03-02', BENCH, [set({ weight: '100', reps: '5' })]),
+    );
+
+  it('reports the ordering as unknown when the set lands on the creation date', () => {
+    const progress = goalProgress(sameDay(), goal({ createdAt: '2026-03-02' }));
+    expect(progress.achieved).toBe(true);
+    expect(progress.achievedRelativeToGoal).toBe('unknown');
+  });
+
+  it('still resolves a set from an earlier day as before', () => {
+    expect(
+      goalProgress(sameDay(), goal({ createdAt: '2026-03-03' }))
+        .achievedRelativeToGoal,
+    ).toBe('before');
+  });
+
+  it('still resolves a set from a later day as after', () => {
+    expect(
+      goalProgress(sameDay(), goal({ createdAt: '2026-03-01' }))
+        .achievedRelativeToGoal,
+    ).toBe('after');
+  });
+
+  it('calls undated legacy history before, which is what it is', () => {
+    const state = stateWith({
+      sessionId: 'legacy',
+      routineDayId: 'day1',
+      status: 'completed',
+      legacyWeekKey: '2025-06-02',
+      exercises: {
+        slot: { movementId: BENCH, sets: [set({ weight: '100', reps: '5' })] },
+      },
+    });
+    expect(goalProgress(state, goal()).achievedRelativeToGoal).toBe('before');
+  });
+
+  it('reports nothing at all when the goal is unmet', () => {
+    const state = stateWith(
+      logged('a', '2026-03-02', BENCH, [set({ weight: '60', reps: '5' })]),
+    );
+    expect(goalProgress(state, goal()).achievedRelativeToGoal).toBeNull();
+  });
+});
+
+describe('the stored mode is what evaluation and editing use', () => {
+  const pullupGoal = goal({
+    movementId: PULLUP,
+    targetWeight: 0,
+    targetReps: 12,
+    mode: 'bodyweight',
+  });
+
+  /** The library reclassifies the movement as a loaded one, after the fact. */
+  const relabelled = (state: WorkoutState): WorkoutState => ({
+    ...state,
+    movements: {
+      ...state.movements,
+      [PULLUP]: { ...state.movements[PULLUP], equipment: 'barbell' },
+    },
+  });
+
+  it('keeps a bodyweight goal reachable after the library is edited', () => {
+    const state = stateWith(
+      logged('a', '2026-03-02', PULLUP, [set({ weight: '', reps: '12' })]),
+    );
+    expect(goalProgress(state, pullupGoal).achieved).toBe(true);
+    // The blank weight still means zero added load, because the GOAL says the
+    // movement is a bodyweight one — not because the library still says so.
+    expect(goalProgress(relabelled(state), pullupGoal).achieved).toBe(true);
+  });
+
+  it('falls back to the library only when the goal stored no mode', () => {
+    const state = stateWith(
+      logged('a', '2026-03-02', PULLUP, [set({ weight: '', reps: '12' })]),
+    );
+    const legacyGoal = goal({
+      movementId: PULLUP,
+      targetWeight: 0,
+      targetReps: 12,
+    });
+    delete (legacyGoal as { mode?: unknown }).mode;
+    expect(goalProgress(state, legacyGoal).achieved).toBe(true);
+    expect(goalProgress(relabelled(state), legacyGoal).achieved).toBe(false);
+  });
+
+  it('leaves the mode alone when an edit does not mention it', () => {
+    const { state } = createGoal(
+      emptyState(),
+      { movementId: PULLUP, targetWeight: 0, targetReps: 12, unit: 'kg' },
+      '2026-01-01',
+      'g1',
+    );
+    expect(state.goals?.g1.mode).toBe('bodyweight');
+    const edited = updateGoal(state, 'g1', { targetReps: 15 });
+    expect(edited.goals?.g1.mode).toBe('bodyweight');
+  });
+
+  it('refuses to erase the mode with an explicit undefined', () => {
+    const { state } = createGoal(
+      emptyState(),
+      { movementId: PULLUP, targetWeight: 0, targetReps: 12, unit: 'kg' },
+      '2026-01-01',
+      'g1',
+    );
+    const edited = updateGoal(state, 'g1', { mode: undefined });
+    expect(edited.goals?.g1.mode).toBe('bodyweight');
+  });
+
+  it('does change the mode when the edit names one', () => {
+    const { state } = createGoal(
+      emptyState(),
+      { movementId: PULLUP, targetWeight: 0, targetReps: 12, unit: 'kg' },
+      '2026-01-01',
+      'g1',
+    );
+    expect(updateGoal(state, 'g1', { mode: 'external' }).goals?.g1.mode).toBe(
+      'external',
+    );
+  });
+});
+
+describe('v5 rejects a goal that is not a goal', () => {
+  const withGoal = (patch: Record<string, unknown>) => {
+    const backup = buildBackup(emptyState());
+    return JSON.stringify({
+      ...backup,
+      goals: {
+        g1: {
+          goalId: 'g1',
+          movementId: BENCH,
+          targetWeight: 100,
+          targetReps: 5,
+          unit: 'kg',
+          createdAt: '2026-01-01',
+          ...patch,
+        },
+      },
+    });
+  };
+
+  it('accepts a well-formed goal', () => {
+    expect(parseBackupJson(withGoal({})).ok).toBe(true);
+  });
+
+  const rejected: [string, Record<string, unknown>][] = [
+    ['a negative target weight', { targetWeight: -5 }],
+    ['a target weight that is not finite', { targetWeight: Number.NaN }],
+    ['zero target reps', { targetReps: 0 }],
+    ['fractional target reps', { targetReps: 2.5 }],
+    ['negative target reps', { targetReps: -3 }],
+    ['an empty goal id', { goalId: '' }],
+    ['an empty movement id', { movementId: '' }],
+    ['a creation date that is not a date', { createdAt: 'yesterday' }],
+    ['a malformed creation date', { createdAt: '2026-1-1' }],
+    ['an unknown mode', { mode: 'assisted' }],
+    ['an unknown side', { side: 'both' }],
+  ];
+
+  for (const [label, patch] of rejected) {
+    it(`rejects ${label}`, () => {
+      const parsed = parseBackupJson(withGoal(patch));
+      expect(parsed.ok).toBe(false);
+    });
+  }
+
+  it('rejects the whole file rather than dropping the bad goal silently', () => {
+    // Losing a goal without saying so would be worse than refusing the import:
+    // the athlete would believe it had been restored.
+    const parsed = parseBackupJson(withGoal({ targetReps: 0 }));
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toContain('not valid');
   });
 });
