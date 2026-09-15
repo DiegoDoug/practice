@@ -46,6 +46,13 @@ const weekStart = () => {
   return `${monday.getFullYear()}-${pad(monday.getMonth() + 1)}-${pad(monday.getDate())}`;
 };
 
+/** Today as a local date key, the way the app writes `performedDate`. */
+const todayKey = () => {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+};
+
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || '/opt/pw-browsers/chromium',
 });
@@ -1672,19 +1679,40 @@ try {
   await page.getByRole('button', { name: 'Add goal' }).click();
   await page.waitForTimeout(600);
   const goalsText = () => page.textContent('[role="dialog"]');
+
+  /**
+   * Which ordering the app should report, derived rather than assumed.
+   *
+   * The qualifying set lives in the session whose TRAINED date the calendar
+   * section corrected to `weekStart()`, and the goal is created today. Those
+   * coincide only when the suite runs on a Monday, so hard-coding the same-day
+   * wording made these assertions fail on the other six days of the week. The
+   * three timing branches themselves are covered deterministically by
+   * `tests/goals.test.ts`; what belongs here is that the UI says the right one.
+   */
+  const sameDayAchievement = weekStart() === todayKey();
+  const achievedLabel = sameDayAchievement ? 'Achieved' : 'Already achieved';
+  const achievedDetail = sameDayAchievement
+    ? 'there is no record of which came first'
+    : 'before setting the goal';
+  const otherDetail = sameDayAchievement
+    ? 'before setting the goal'
+    : 'there is no record of which came first';
+
   ok(
     'a goal met by existing history reads as achieved straight away',
-    (await goalsText()).includes('Achieved'),
-    (await goalsText()).slice(0, 160),
+    (await goalsText()).includes(achievedLabel),
+    `expected "${achievedLabel}" in ${(await goalsText()).slice(0, 160)}`,
   );
   ok(
-    'a same-day achievement says the order is unknown, not that it was earned since',
-    (await goalsText()).includes('there is no record of which came first'),
-    (await goalsText()).slice(-260),
+    'the achievement says how it sits relative to the goal being set',
+    (await goalsText()).includes(achievedDetail),
+    `expected "${achievedDetail}" in ${(await goalsText()).slice(-260)}`,
   );
   ok(
-    'and it does not claim the goal was already achieved beforehand',
-    !(await goalsText()).includes('Already achieved'),
+    'and it does not claim the other ordering as well',
+    !(await goalsText()).includes(otherDetail),
+    `did not expect "${otherDetail}"`,
   );
   ok(
     'both dimensions are reported, with no blended percentage',
@@ -1713,8 +1741,9 @@ try {
   await page.waitForTimeout(600);
   ok(
     'lowering it again restores the achievement',
-    (await goalsText()).includes('Achieved') &&
+    (await goalsText()).includes(achievedLabel) &&
       !(await goalsText()).includes('Not yet'),
+    (await goalsText()).slice(0, 160),
   );
 
   // Accessibility and width, with the goals list on screen.
@@ -1768,7 +1797,7 @@ try {
   ok(
     'it is still there, marked archived, with its achievement intact',
     (await goalsText()).includes('archived') &&
-      (await goalsText()).includes('Achieved'),
+      (await goalsText()).includes(achievedLabel),
     (await goalsText()).slice(0, 160),
   );
 
@@ -1881,7 +1910,7 @@ try {
   await page.waitForTimeout(600);
   ok(
     'the sets that met the goal are untouched by deleting it',
-    (await goalsText()).includes('Achieved'),
+    (await goalsText()).includes(achievedLabel),
     (await goalsText()).slice(0, 140),
   );
   await page.keyboard.press('Escape');
