@@ -181,7 +181,122 @@ group definitions.
 
 A template edit never alters a frozen session. Updating an unstarted
 `scheduled` session from its template is a separate, explicitly named
-operation — not a side effect of editing the routine.
+operation — `refreshOpenSnapshots` — not a side effect of editing the routine.
+It re-freezes group definitions along with everything else, and it refuses to
+touch a `completed` session.
+
+Group membership is by `slotId`, so a **substituted** movement stays in its
+group: the group holds the slot, not the movement performed in it.
+
+## Supersets and circuits
+
+A group is **planning structure**, not a second copy of workout data. Exercises
+and sets remain the canonical log; everything an athlete sees about a group is
+derived from the completed sets on every read.
+
+### Shape
+
+`ExerciseGroup` lives on a `RoutineDay` and is copied into a `SessionSnapshot`
+when the session freezes. Its invariants:
+
+| Rule                                             | Why                                                                                               |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| Members are `slotId`s                            | Stable across reorder, rename and substitution. A rendered index is not an identity.              |
+| A group belongs to exactly one day or snapshot   | A group is part of a plan, and a frozen session's plan is its own.                                |
+| At least two distinct exercises                  | One exercise is not a superset.                                                                   |
+| Every member exists in the owning day            | A dangling member has nothing to render.                                                          |
+| A slot is in at most one group                   | Membership is single-valued; an overlap is refused, never resolved by moving an exercise.         |
+| Order is `slotIds`                               | So supersets and circuits are representable independently of display order.                       |
+| `rounds` is a positive integer                   | Zero, negative, fractional, `Infinity` and `NaN` are all refused by one `.int().positive()` rule. |
+| Rest is a whole number of seconds ≥ 0, or absent | Absent means "use my usual rest". **Zero is a value**, meaning straight into the next exercise.   |
+
+Removing an exercise removes it from its groups, and a group left with fewer
+than two members is dissolved. Neither touches a logged set. Duplicating a day
+re-points its groups at the copy's own slots and mints fresh group ids, because
+two days must never claim one group.
+
+### The round mapping
+
+One rule drives everything:
+
+> **round _r_ (1-based) of a member slot is set index _r − 1_ of that slot.**
+
+It needs no extra field, it survives a reload, and it re-derives the instant a
+set is reopened, edited or deleted.
+
+### Execution rules
+
+| Question                                      | Answer                                                                                                                                                                                                                                                                                                                                                    |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| What completes one exercise within round _r_? | Its set at index _r − 1_ is explicitly `done`.                                                                                                                                                                                                                                                                                                            |
+| What completes a round?                       | Every member the round is waiting on is done — within the planned rounds that is all of them; past the planned rounds it is whoever logged a set there.                                                                                                                                                                                                   |
+| Exercises with different set counts?          | The **plan** settles it. Within the planned rounds every member is waited on, so a member that ran fewer sets leaves that round unfinished — the honest reading, since the round was not completed as planned. Past the planned rounds only members that actually logged a set take part, so extra work on one exercise invents no obligation on another. |
+| A set is reopened?                            | Its round is incomplete again on the next read. Nothing to invalidate — nothing was stored.                                                                                                                                                                                                                                                               |
+| Manual round advancement?                     | **Not offered.** A control that could disagree with the logs would be a second source of truth. Rounds advance by ticking sets.                                                                                                                                                                                                                           |
+| Skipped or partially completed rounds?        | Each round stands alone. `completedRounds` counts the rounds that are fully complete; `currentRound` is the first that is not. A partly-ticked round is neither.                                                                                                                                                                                          |
+| What is "next"?                               | The first member of the current round that is waited on and not done, in `slotIds` order — exactly the members that decide whether the round closes, so guidance and completion can never disagree.                                                                                                                                                       |
+| The last exercise of the last round?          | Completes the group. The group block reads "complete", and rest falls back to the global default (see below).                                                                                                                                                                                                                                             |
+| Standalone exercises?                         | Unaffected. A group renders at the position of its first member; ungrouped exercises keep their places around it, and each exercise renders exactly once.                                                                                                                                                                                                 |
+
+`totalRounds` is `max(plannedRounds, longest member set count)`: extra sets
+beyond the plan are shown, and the plan is never shrunk to hide unlogged rounds.
+Rounds that were planned but hold no sets stay outstanding — they are **not**
+manufactured as complete.
+
+The rule that a member is waited on while `round <= plannedRounds` is what stops
+a superset reporting round 1 as finished the moment its first exercise is ticked
+and the second has not been typed into yet. It is a deliberate product decision:
+the logs alone cannot tell "I have not got to the incline press yet" from "I
+meant to do fewer sets of it", and of the two readings only this one keeps the
+round counter, the next-up guidance and the rest timer honest during the set
+that is actually being performed.
+
+### Why `groupProgress` is not written
+
+`WorkoutSession.groupProgress` is part of the released v5 shape and is still
+**validated** on restore, but this build never writes it. Derivation is
+sufficient: the completed sets already answer every question above, and they
+answer it correctly after an edit, a deletion, a reopen, a restore and a
+migration without any reconciliation step. A stored count would have to be
+invalidated by six different write paths, and the first one that forgot would
+show an athlete a round total their own logs contradict.
+
+A restored document that carries the field is checked rather than trusted:
+progress for a group that does not exist in that session's snapshot, or for
+more rounds than the session could possibly hold
+(`max(rounds, longest member set count)`), fails the whole file.
+
+### Rest, and which duration wins
+
+Completing a set is still the **only** thing that starts rest. The duration is
+then chosen deterministically:
+
+| Situation                             | Rest                                                                            |
+| ------------------------------------- | ------------------------------------------------------------------------------- |
+| The slot is in no group               | The global default — Stage 1–6 behaviour, unchanged                             |
+| The completion finished the **group** | The global default                                                              |
+| The completion closed a **round**     | `restBetweenRoundsSec`, else `restBetweenExercisesSec`, else the global default |
+| Otherwise (mid-round)                 | `restBetweenExercisesSec`, else the global default                              |
+
+The group rule outranks the round rule deliberately: the last round's boundary
+is not a boundary _between_ rounds, because there is no round after it.
+
+Every Stage 1–6 timer guarantee is preserved. There is still at most one live
+rest timer; it still survives navigation and reload; completing a set is still
+durable even when timer storage fails; **no** timer starts from hydration,
+restore, migration or ordinary editing; and reopening a set still creates no
+timer. Choosing a group duration happens on the same explicit-completion edge
+that already started rest, and the whole computation is guarded — a boundary
+that cannot be worked out falls back to the session default rather than
+skipping rest or, worse, failing the set.
+
+### History
+
+A past session's groups are read from `session.snapshot` alone, never from the
+current routine. Editing, renaming or deleting a group in the template does not
+relabel a finished workout, sets are never merged across exercises, missing
+rounds are never manufactured, ungrouped exercises are never lost, and
+completion is never inferred from routine position.
 
 ## Muscles
 

@@ -27,7 +27,18 @@ import {
   setSlotUnilateral,
   slotHasHistory,
 } from '@/lib/routine';
-import type { WorkoutState } from '@/lib/types';
+import {
+  groupKindLabel,
+  removeGroup,
+  saveGroup,
+  type GroupProblem,
+} from '@/lib/groups';
+import { GroupEditor } from './group-editor';
+import type {
+  ExerciseGroup,
+  ExerciseGroupKind,
+  WorkoutState,
+} from '@/lib/types';
 
 type RoutineDialogProps = {
   open: boolean;
@@ -56,6 +67,16 @@ export function RoutineDialog({
 }: RoutineDialogProps) {
   const [openDayId, setOpenDayId] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
+  /**
+   * The group being built or edited. `groupId: null` is a new one; a refusal
+   * from the domain layer comes back as `saveError` and the form stays open
+   * with what the athlete typed intact.
+   */
+  const [editingGroup, setEditingGroup] = useState<{
+    groupId: string | null;
+    kind: ExerciseGroupKind;
+  } | null>(null);
+  const [saveError, setSaveError] = useState<GroupProblem[]>([]);
 
   const days = activeDays(state);
   const day = openDayId ? findDay(state.routine, openDayId) : undefined;
@@ -63,21 +84,109 @@ export function RoutineDialog({
   const close = () => {
     setOpenDayId(null);
     setConfirming(null);
+    setEditingGroup(null);
+    setSaveError([]);
     onClose();
+  };
+
+  const groups = day?.groups ?? [];
+  const editingExisting =
+    editingGroup?.groupId != null
+      ? (groups.find((group) => group.groupId === editingGroup.groupId) ?? null)
+      : null;
+
+  const namesIn = (group: ExerciseGroup): string =>
+    group.slotIds
+      .map((slotId) => {
+        const slot = day?.exercises.find((entry) => entry.slotId === slotId);
+        return slot ? resolveSlotName(state.movements, slot) : slotId;
+      })
+      .join(' \u2192 ');
+
+  const onSaveGroup = (draft: ExerciseGroup) => {
+    if (!day) return;
+    // Validate against the state the edit will actually land on, then apply it
+    // through the same pure helper the tests use. A refusal writes nothing.
+    const result = saveGroup(state, day.dayId, draft);
+    if (!result.ok) {
+      setSaveError(result.problems);
+      return;
+    }
+    setSaveError([]);
+    setEditingGroup(null);
+    onEdit(
+      (previous) => {
+        const applied = saveGroup(previous, day.dayId, draft);
+        return applied.ok ? applied.state : previous;
+      },
+      `${groupKindLabel(draft.kind)} saved with ${draft.slotIds.length} exercises and ${draft.rounds} rounds.`,
+    );
   };
 
   return (
     <Dialog
       open={open}
       onClose={close}
-      title={day ? `Edit ${day.label}` : 'Routine'}
+      title={
+        day && editingGroup
+          ? `${day.label} · group`
+          : day
+            ? `Edit ${day.label}`
+            : 'Routine'
+      }
       description={
-        day
-          ? 'Reorder or remove exercises. Anything you have already logged is kept.'
-          : 'Add, rename, duplicate or reorder your training days. Past workouts keep the names they were logged under.'
+        day && editingGroup
+          ? 'Choose the exercises, their order, the rounds and the rest. Removing a group never deletes an exercise or its history.'
+          : day
+            ? 'Reorder or remove exercises, and group them into supersets or circuits. Anything you have already logged is kept.'
+            : 'Add, rename, duplicate or reorder your training days. Past workouts keep the names they were logged under.'
       }
     >
-      {day ? (
+      {day && editingGroup ? (
+        <div>
+          <button
+            type="button"
+            onClick={() => {
+              setEditingGroup(null);
+              setSaveError([]);
+            }}
+            className={secondaryButton}
+          >
+            <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+            Back to {day.label}
+          </button>
+          {saveError.length > 0 ? (
+            <div
+              role="alert"
+              className="rounded-control border-sunset-orange/50 bg-orange-soft mt-3 border p-3"
+            >
+              <ul className="text-ocean-deep space-y-1 text-[13px]">
+                {saveError.map((problem) => (
+                  <li key={`${problem.code}-${problem.message}`}>
+                    {problem.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          <div className="mt-3">
+            <GroupEditor
+              /* Re-mount per target so a fresh form never inherits the last
+                 one's selection. */
+              key={editingGroup.groupId ?? 'new'}
+              day={day}
+              movements={state.movements}
+              existing={editingExisting}
+              initialKind={editingGroup.kind}
+              onSave={onSaveGroup}
+              onCancel={() => {
+                setEditingGroup(null);
+                setSaveError([]);
+              }}
+            />
+          </div>
+        </div>
+      ) : day ? (
         <div>
           <button
             type="button"
@@ -263,6 +372,99 @@ export function RoutineDialog({
             <Plus className="h-4 w-4" aria-hidden="true" />
             Add exercise
           </button>
+
+          <h3 className="text-ocean-deep mt-6 mb-1 text-[13px] font-bold">
+            Supersets &amp; circuits
+          </h3>
+          {groups.length === 0 ? (
+            <p className="text-muted py-1 text-[13px]">
+              No groups on this day. Pair two or more exercises to run them back
+              to back.
+            </p>
+          ) : (
+            <ul className="divide-hairline divide-y">
+              {groups.map((group) => (
+                <li
+                  key={group.groupId}
+                  data-routine-group={group.groupId}
+                  className="flex flex-wrap items-center gap-2 py-2"
+                >
+                  <div className="min-w-[140px] flex-1">
+                    <p className="text-ocean-deep text-[14px] font-semibold">
+                      {groupKindLabel(group.kind)} · {group.rounds}{' '}
+                      {group.rounds === 1 ? 'round' : 'rounds'}
+                    </p>
+                    <p className="text-muted text-[12px]">{namesIn(group)}</p>
+                  </div>
+                  <button
+                    type="button"
+                    className={secondaryButton}
+                    onClick={() => {
+                      setSaveError([]);
+                      setEditingGroup({
+                        groupId: group.groupId,
+                        kind: group.kind,
+                      });
+                    }}
+                  >
+                    Edit
+                    <span className="sr-only">
+                      {groupKindLabel(group.kind)} with {namesIn(group)}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className={iconButton}
+                    onClick={() =>
+                      onEdit(
+                        (previous) =>
+                          removeGroup(previous, day.dayId, group.groupId),
+                        `${groupKindLabel(group.kind)} removed. Its exercises and everything logged against them are kept.`,
+                      )
+                    }
+                  >
+                    <Trash2 className="h-4 w-4" aria-hidden="true" />
+                    <span className="sr-only">
+                      Remove this {groupKindLabel(group.kind).toLowerCase()},
+                      keeping its exercises
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={day.exercises.length < 2}
+              className={`${secondaryButton} flex-1 disabled:opacity-40`}
+              onClick={() => {
+                setSaveError([]);
+                setEditingGroup({ groupId: null, kind: 'superset' });
+              }}
+            >
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              New superset
+            </button>
+            <button
+              type="button"
+              disabled={day.exercises.length < 2}
+              className={`${secondaryButton} flex-1 disabled:opacity-40`}
+              onClick={() => {
+                setSaveError([]);
+                setEditingGroup({ groupId: null, kind: 'circuit' });
+              }}
+            >
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              New circuit
+            </button>
+          </div>
+          {day.exercises.length < 2 ? (
+            <p className="text-muted mt-1 text-[12px]">
+              Add a second exercise to this day before grouping.
+            </p>
+          ) : null}
         </div>
       ) : (
         <div>

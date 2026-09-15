@@ -12,6 +12,7 @@ import {
 import { setVolume, sideTotals } from './volume';
 import { isSetComplete, type CompletionMode } from './completion';
 import { ensureSessionSnapshot, resolveSessionRoutine } from './routine';
+import { deriveGroupProgress, groupKindLabel } from './groups';
 import {
   compareSessions,
   effectiveDate,
@@ -303,6 +304,18 @@ export function countLoggedExercises(
   ).length;
 }
 
+/** One frozen group, summarised from the session's own snapshot and logs. */
+export type HistoryGroup = {
+  groupId: string;
+  /** "Superset" / "Circuit", as it was frozen. */
+  kindLabel: string;
+  plannedRounds: number;
+  completedRounds: number;
+  totalRounds: number;
+  /** Member names in performed order, as frozen. */
+  exercises: string[];
+};
+
 export type HistoryEntry = {
   sessionId: string;
   /** The routine day it came from, or null for an ad-hoc workout. */
@@ -317,6 +330,12 @@ export type HistoryEntry = {
   volume: number;
   completed: boolean;
   archived: boolean;
+  /**
+   * Read from `session.snapshot` ALONE, never from the live routine. A group
+   * added to, renamed in, or deleted from the template after the fact must not
+   * change what a finished workout says it was.
+   */
+  groups: HistoryGroup[];
 };
 
 /**
@@ -358,6 +377,20 @@ export function buildHistory(state: WorkoutState): HistoryEntry[] {
       archived: session.routineDayId
         ? archivedIds.has(session.routineDayId)
         : false,
+      groups: (session.snapshot?.groups ?? []).map((group) => {
+        const progress = deriveGroupProgress(group, session.exercises);
+        const nameOf = (slotId: string) =>
+          session.snapshot?.exercises.find((slot) => slot.slotId === slotId)
+            ?.name ?? slotId;
+        return {
+          groupId: group.groupId,
+          kindLabel: groupKindLabel(group.kind),
+          plannedRounds: progress.plannedRounds,
+          completedRounds: progress.completedRounds,
+          totalRounds: progress.totalRounds,
+          exercises: group.slotIds.map(nameOf),
+        };
+      }),
     });
   }
   return entries;

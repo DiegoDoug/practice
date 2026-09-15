@@ -24,7 +24,13 @@ import { Dialog } from './dialog';
 import { SafeModeNotice } from './safe-mode-notice';
 import { LiveSessionBar } from './live-session-bar';
 import { useLiveSession } from '@/lib/use-live-session';
-import { isPaused } from '@/lib/live-session';
+import { DEFAULT_REST_SEC, isPaused } from '@/lib/live-session';
+import {
+  deriveGroupProgress,
+  groupKindLabel,
+  groupOfSlot,
+  restForCompletion,
+} from '@/lib/groups';
 import { WeeklyOverview } from './weekly-overview';
 import { WorkoutDay } from './workout-day';
 import { buildWeekCsv, countCsvDataRows, weekCsvFilename } from '@/lib/csv';
@@ -361,23 +367,18 @@ export function WorkoutApp() {
   );
 
   /**
-   * Start the rest countdown for a set the athlete just ticked.
+   * A set was explicitly ticked: start the right rest if a timer for THIS
+   * session is running, then announce any round or group boundary it crossed
+   * and any record it took.
    *
-   * The card fires this only on the unfinished → completed edge. The extra
-   * conditions here are that a live, unpaused timer is running AND that it
-   * belongs to the session being logged into — completing a set in some other
-   * session, a past workout being corrected, say, must not restart the timer
-   * on the one actually in progress.
-   */
-  /**
-   * A set was explicitly ticked: start rest if a timer for THIS session is
-   * running, then check whether the completion took any records.
+   * Everything here runs against a PROJECTION of the write the card has already
+   * dispatched — `state` does not hold it yet — and only from this path, which
+   * is why hydration, a restore, a migration and an ordinary edit stay silent
+   * and start nothing.
    *
-   * The record check runs against a PROJECTION of the write that is landing —
-   * `state` does not yet contain it at this point — and never against a
-   * hydration or an import, because this is the only path that calls it. The
-   * celebration memory then filters anything already announced, so reopening a
-   * set and ticking it again is silent while genuinely improving it is not.
+   * The whole block is a nicety layered on a set that is already logged, so
+   * every part of it is guarded: losing a countdown, a round announcement or a
+   * congratulation is survivable, and losing the set is not.
    */
   const onSetComplete = useCallback(
     (
@@ -387,54 +388,109 @@ export function WorkoutApp() {
       movementId?: string,
       unilateral?: boolean,
     ) => {
-      if (live.session && !isPaused(live.session)) {
-        if (
-          activeSession &&
-          live.session.sessionId === activeSession.sessionId
-        ) {
-          live.startRest();
-        }
-      }
+      const timerIsForThisSession = Boolean(
+        live.session &&
+        !isPaused(live.session) &&
+        activeSession &&
+        live.session.sessionId === activeSession.sessionId,
+      );
 
-      if (!setId || !movementId) return;
-
-      // A record is a nicety. Nothing in here may stop a set being logged, so
-      // the whole check is guarded: the write has already been dispatched by
-      // the caller before this runs.
+      // `latestState()`, not `state`: two completions dispatched from one event
+      // would otherwise both project from the same stale base, and the second
+      // would be judged without the first.
+      let projected: WorkoutState | null = null;
+      let projectedId = '';
       try {
         const today = toLocalDateKey(new Date());
-        // `latestState()`, not `state`: two completions dispatched from one
-        // event would otherwise both project from the same stale base, and the
-        // second would be judged without the first.
-        const current = latestState();
-        const target = writeTarget(current, today);
-        if (!target) return;
+        const target = writeTarget(latestState(), today);
+        if (target && movementId) {
+          projected = withSets(
+            target.state,
+            target.sessionId,
+            slotId,
+            sets,
+            movementId,
+            unilateral,
+            today,
+          );
+          projectedId = target.sessionId;
+        }
+      } catch {
+        projected = null;
+      }
 
-        const projected = withSets(
-          target.state,
-          target.sessionId,
-          slotId,
-          sets,
-          movementId,
-          unilateral,
-          today,
-        );
-        const broken = recordsBrokenBy(projected, movementId, setId);
-        if (broken.length === 0) return;
+      const notices: string[] = [];
 
-        const fresh = celebrations.claim(broken.map(celebrationKey));
-        const announce = broken.filter((record) =>
-          fresh.includes(celebrationKey(record)),
-        );
-        if (announce.length === 0) return;
-        setAnnouncement(
-          `New record! ${announce
-            .map((record) => describeRecord(record, current.unit))
-            .join(' \u00b7 ')}`,
-        );
+      // --- Rest, and the group boundary it names -------------------------
+      if (timerIsForThisSession) {
+        let seconds: number | undefined;
+        try {
+          const session = projected?.sessions[projectedId];
+          const setIndex = sets.findIndex((entry) => entry.setId === setId);
+          if (projected && session && setIndex >= 0) {
+            const snapshot = resolveSessionRoutine(projected, session);
+            const choice = restForCompletion(
+              snapshot.groups,
+              session.exercises,
+              slotId,
+              setIndex,
+              live.session?.restDefaultSec ?? DEFAULT_REST_SEC,
+            );
+            if (choice.boundary !== 'none') seconds = choice.sec;
+
+            const group = groupOfSlot(snapshot.groups, slotId);
+            if (group) {
+              const progress = deriveGroupProgress(group, session.exercises);
+              const nameOf = (id: string | null) =>
+                snapshot.exercises.find((entry) => entry.slotId === id)?.name;
+              const kind = groupKindLabel(group.kind);
+              if (choice.boundary === 'group') {
+                notices.push(
+                  `${kind} complete · ${progress.completedRounds} of ${progress.totalRounds} rounds.`,
+                );
+              } else if (choice.boundary === 'round') {
+                const next = nameOf(progress.currentSlotId);
+                notices.push(
+                  `Round ${progress.completedRounds} of ${progress.totalRounds} done.${
+                    next ? ` Next up: ${next}.` : ''
+                  }`,
+                );
+              } else {
+                const next = nameOf(progress.currentSlotId);
+                if (next)
+                  notices.push(`Next in the ${kind.toLowerCase()}: ${next}.`);
+              }
+            }
+          }
+        } catch {
+          // A boundary we could not work out is still a completed set. Fall
+          // back to the session default rather than skipping rest entirely.
+          seconds = undefined;
+        }
+        live.startRest(seconds);
+      }
+
+      // --- Records -------------------------------------------------------
+      try {
+        if (projected && setId && movementId) {
+          const broken = recordsBrokenBy(projected, movementId, setId);
+          const fresh = celebrations.claim(broken.map(celebrationKey));
+          const announce = broken.filter((record) =>
+            fresh.includes(celebrationKey(record)),
+          );
+          if (announce.length > 0) {
+            notices.push(
+              `New record! ${announce
+                .map((record) => describeRecord(record, projected.unit))
+                .join(' \u00b7 ')}`,
+            );
+          }
+        }
       } catch {
         // Storage or computation trouble loses a congratulation, never a set.
       }
+
+      if (notices.length > 0) setAnnouncement(notices.join(' '));
     },
     [activeSession, celebrations, latestState, live, writeTarget],
   );

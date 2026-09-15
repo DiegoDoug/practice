@@ -1,6 +1,7 @@
 import { PROGRAM } from './program';
 import { UNKNOWN_MOVEMENT_ID, seededMovements, slugify } from './movements';
 import { loadModeFor } from './measure';
+import { newGroupId, sanitizeGroups } from './groups';
 import type {
   Movement,
   RoutineDay,
@@ -182,7 +183,14 @@ export function sessionSnapshotOf(
     exercises: base.exercises.map((entry) =>
       snapshotExercise(movements, entry),
     ),
-    groups: (day.groups ?? []).map((group) => ({ ...group })),
+    // Deep-copied and reconciled against the slots actually being frozen, so a
+    // snapshot can never carry a member the session does not contain. A
+    // substituted slot keeps its membership: the group holds the stable slotId,
+    // not the movement.
+    groups: sanitizeGroups(
+      day.groups,
+      base.exercises.map((entry) => entry.slotId),
+    ),
   };
 }
 
@@ -351,6 +359,21 @@ export function duplicateDay(state: WorkoutState, dayId: string): WorkoutState {
   const source = findDay(state.routine, dayId);
   if (!source) return state;
   const newId = newDayId(state.routine);
+  const slotIdMap = new Map(
+    source.exercises.map(
+      (slot, index) => [slot.slotId, slotIdFor(newId, index)] as const,
+    ),
+  );
+  // The copy gets its own slot ids, so its groups must be re-pointed at them
+  // and given fresh ids of their own. Carrying the originals across would make
+  // two days claim one group, and one day's groups reference the other's slots.
+  const groups = (source.groups ?? []).map((group) => ({
+    ...group,
+    groupId: newGroupId(),
+    slotIds: group.slotIds
+      .map((slotId) => slotIdMap.get(slotId))
+      .filter((slotId): slotId is string => slotId !== undefined),
+  }));
   const copy: RoutineDay = {
     ...source,
     dayId: newId,
@@ -361,6 +384,11 @@ export function duplicateDay(state: WorkoutState, dayId: string): WorkoutState {
       ...slot,
       slotId: slotIdFor(newId, index),
     })),
+    ...(groups.length > 0
+      ? {
+          groups: sanitizeGroups(groups, [...slotIdMap.values()]),
+        }
+      : {}),
   };
   const at = state.routine.findIndex((day) => day.dayId === dayId);
   const routine = [...state.routine];
@@ -450,10 +478,21 @@ export function removeExercise(
   dayId: string,
   slotId: string,
 ): WorkoutState {
-  return mapDay(state, dayId, (day) => ({
-    ...day,
-    exercises: day.exercises.filter((slot) => slot.slotId !== slotId),
-  }));
+  return mapDay(state, dayId, (day) => {
+    const exercises = day.exercises.filter((slot) => slot.slotId !== slotId);
+    // A group cannot outlive its members: the removed slot leaves every group,
+    // and a group left with fewer than two exercises stops being one. Logged
+    // sets are untouched — this is a planning change.
+    const groups = sanitizeGroups(
+      day.groups,
+      exercises.map((slot) => slot.slotId),
+    );
+    if (groups.length === 0) {
+      const { groups: _dropped, ...rest } = day;
+      return { ...rest, exercises };
+    }
+    return { ...day, exercises, groups };
+  });
 }
 
 export function moveExercise(

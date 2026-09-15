@@ -21,7 +21,13 @@ export type LiveSessionStore = {
   resume: () => void;
   finish: () => void;
   discard: () => void;
-  startRest: () => void;
+  /**
+   * Start the one rest countdown. An explicit duration is what group rest uses;
+   * omitting it keeps the session's default, which is the Stage 1–6 behaviour.
+   * Still reachable only from an explicit set completion — never from
+   * hydration, restore, migration or an ordinary edit.
+   */
+  startRest: (durationSec?: number) => void;
   skipRest: () => void;
   extendRest: (bySec: number) => void;
 };
@@ -79,7 +85,20 @@ export function useLiveSession(): LiveSessionStore {
   const resume = useCallback(() => mutate((s) => resumeSession(s)), [mutate]);
   const finish = useCallback(() => write(null), [write]);
   const discard = useCallback(() => write(null), [write]);
-  const startRest = useCallback(() => mutate((s) => startRestOf(s)), [mutate]);
+  const startRest = useCallback(
+    (durationSec?: number) =>
+      mutate((s) =>
+        startRestOf(
+          s,
+          Date.now(),
+          // A group may legitimately ask for 0 ("straight into the next
+          // exercise"), so `??` rather than `||`: zero is a duration, not a
+          // missing value.
+          durationSec ?? s.restDefaultSec,
+        ),
+      ),
+    [mutate],
+  );
   const skipRest = useCallback(() => mutate((s) => skipRestOf(s)), [mutate]);
   const extendRest = useCallback(
     (bySec: number) => mutate((s) => extendRestOf(s, bySec)),

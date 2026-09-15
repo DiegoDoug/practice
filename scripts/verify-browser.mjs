@@ -4,6 +4,7 @@
  */
 import { chromium } from 'playwright';
 import AxeBuilder from '@axe-core/playwright';
+import { runGroupScenario } from './verify-groups.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -2057,6 +2058,14 @@ try {
   ok('desktop dialog is vertically centred', centered);
   await dpage.keyboard.press('Escape');
   await dpage.screenshot({ path: file('desktop.png'), fullPage: true });
+
+  // ---------- Supersets and circuits ----------
+  // Runs in its own contexts at both widths so the scenario starts from a clean
+  // store rather than inheriting whatever the passes above left behind. The
+  // same function is what `node scripts/verify-groups.mjs` repeats on its own.
+  for (const width of [320, 1280]) {
+    await runGroupScenario({ browser, width, ok, file, base: BASE });
+  }
 
   ok(
     'no uncaught page errors',
