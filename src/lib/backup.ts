@@ -226,14 +226,26 @@ const sessionSchema = z.object({
   groupProgress: z.record(z.string(), z.number()).optional(),
 });
 
+/** A local calendar day, `YYYY-MM-DD`, as `week.ts` writes them. */
+const dateKeySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+
+/**
+ * A goal is validated strictly, and a bad one fails the whole file.
+ *
+ * Dropping it quietly would be worse: the athlete would believe the goal had
+ * been restored. The values are the ones evaluation depends on — a negative
+ * target, a fractional rep count or a creation date that is not a date would
+ * each produce a goal that can never read correctly.
+ */
 const goalSchema = z.object({
-  goalId: z.string(),
-  movementId: z.string(),
-  targetWeight: z.number(),
-  targetReps: z.number(),
+  goalId: z.string().min(1),
+  movementId: z.string().min(1),
+  targetWeight: z.number().finite().nonnegative(),
+  targetReps: z.number().int().positive(),
   unit: z.enum(['lb', 'kg']),
+  mode: z.enum(['external', 'bodyweight']).optional(),
   side: z.enum(['left', 'right']).optional(),
-  createdAt: z.string(),
+  createdAt: dateKeySchema,
   archived: z.boolean().optional(),
 });
 

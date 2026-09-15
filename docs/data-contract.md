@@ -198,9 +198,55 @@ counted as zero.
 ## Goals
 
 A goal is satisfied only by a **single set** meeting target weight and target
-reps together, performed **on or after** the goal's `createdAt`. Pre-existing
-history does not retroactively complete a goal, and a heavy low-rep set plus a
-lighter high-rep set never jointly satisfy one.
+reps together. A heavy low-rep set plus a lighter high-rep set never jointly
+satisfy one.
+
+**Existing history counts.** An earlier draft of this contract required the
+qualifying set to fall on or after the goal's `createdAt`; it no longer does,
+because a goal is a statement about a lift, not about a date, and telling an
+athlete they have not done something already in their log is simply wrong.
+A goal met by earlier history reads as achieved from the moment it is created,
+and `achievedRelativeToGoal` says where the qualifying set sits:
+
+| Value     | Meaning                                                                                  |
+| --------- | ---------------------------------------------------------------------------------------- |
+| `before`  | The set predates the goal, or is undated legacy history. The UI says "already achieved". |
+| `after`   | The set was performed after the goal was set.                                            |
+| `unknown` | The set landed on the **same day** the goal was created.                                 |
+
+`unknown` is not a gap to be closed later. A goal carries a local **date** and
+a set carries `doneAt` only when it was ticked in this app, so for a same-day
+achievement nothing in the document records which came first. Resolving it
+would mean manufacturing a timestamp, so the UI says the order is unknown
+instead of picking one. An **undated** legacy set is `before`: it came from an
+older document, and dating it after the goal would be a guess.
+
+Achievement is **derived** from the logs, never stored. Reopening, editing or
+deleting the qualifying set — or raising the target — changes the answer on the
+next read, so no stale flag can survive a correction. Archiving a goal retires
+it without touching the history that met it.
+
+Goals reuse the record eligibility rules: completed **working** sets only, so a
+warmup or a drop set cannot complete a goal. Loads are compared by physical
+magnitude, so a target set in kilos can be met by a set logged in pounds; the
+display preference is not consulted. A goal stores the logging `mode` it was
+set under, and that stored mode is **authoritative wherever the goal is read**:
+evaluation passes it down to the analytics layer instead of consulting the
+library, so reclassifying a movement afterwards cannot make a reps-only goal
+permanently unreachable. Editing a target never restamps it — only a genuine
+change of exercise re-reads the mode, and a patch carrying `mode: undefined`
+leaves the stored one alone rather than erasing it.
+
+A **unilateral** movement yields left and right measurements and no combined
+one, so a bilateral target for it could never be met. The goal form defaults
+such a goal to a side and does not offer "Both sides": presenting an
+unreachable target as a choice is a trap, not a choice.
+
+Goal fields are validated strictly on restore — a non-negative finite target
+weight, a positive whole target rep count, non-empty ids, and a `YYYY-MM-DD`
+creation date. A malformed goal fails the **whole file** rather than being
+dropped, because a silently dropped goal leaves the athlete believing it was
+restored.
 
 Progress is reported on both dimensions — best weight at the target reps, best
 reps at the target weight — rather than one percentage that would hide which

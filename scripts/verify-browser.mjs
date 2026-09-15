@@ -1387,7 +1387,14 @@ try {
   await page.waitForTimeout(500);
   await page.getByLabel(`${prExercise} set 3 weight`).fill('135');
   await page.getByLabel(`${prExercise} set 3 reps`).fill('2');
-  await page.waitForTimeout(600);
+  // Both rows must be saved before either is ticked: the point of the check is
+  // two completions racing each other, not a completion racing a pending save.
+  await waitForStored(
+    (sets) =>
+      sets.some((set) => set.weight === '405') &&
+      sets.some((set) => set.weight === '135'),
+    'both rapid-completion sets',
+  );
 
   // Both rows must be saved before either is ticked: the subject is two
   // completions racing each other, not a completion racing a pending save.
@@ -1632,6 +1639,295 @@ try {
   await page.waitForTimeout(250);
   await page.getByLabel(`${prExercise} set 2 type`).selectOption('working');
   await page.waitForTimeout(500);
+
+  // ---------- Goals ----------
+  // The goal reads the same completed working sets records do, so a goal set
+  // now is answered by history already logged — no fresh lift required.
+  await page.getByRole('button', { name: 'Progress' }).click();
+  await page.waitForSelector('[role="dialog"]');
+  await page.getByRole('tab', { name: 'Goals' }).click();
+  await page.waitForTimeout(300);
+  ok(
+    'the goals tab opens with no goals yet',
+    (await page.textContent('[role="dialog"]')).includes('No active goals'),
+  );
+
+  await page.getByRole('button', { name: 'New goal' }).click();
+  await page.waitForTimeout(300);
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('button', { name: new RegExp(prExercise) })
+    .first()
+    .click();
+  await page.waitForTimeout(300);
+  ok(
+    'the goal form names the exercise',
+    (await page.textContent('[role="dialog"]')).includes('New goal'),
+  );
+
+  // 300 lb for 5. Set 1 is already logged at 315 x 9, which clears both.
+  await page.getByLabel('Target weight').fill('300');
+  await page.getByLabel('Target reps').fill('5');
+  await page.getByRole('button', { name: 'Add goal' }).click();
+  await page.waitForTimeout(600);
+  const goalsText = () => page.textContent('[role="dialog"]');
+  ok(
+    'a goal met by existing history reads as achieved straight away',
+    (await goalsText()).includes('Achieved'),
+    (await goalsText()).slice(0, 160),
+  );
+  ok(
+    'a same-day achievement says the order is unknown, not that it was earned since',
+    (await goalsText()).includes('there is no record of which came first'),
+    (await goalsText()).slice(-260),
+  );
+  ok(
+    'and it does not claim the goal was already achieved beforehand',
+    !(await goalsText()).includes('Already achieved'),
+  );
+  ok(
+    'both dimensions are reported, with no blended percentage',
+    (await goalsText()).includes('Best weight at 5+ reps') &&
+      (await goalsText()).includes('Best reps at 300 lb+') &&
+      !(await goalsText()).includes('%'),
+  );
+
+  // Raising the target must un-achieve it: achievement is derived, not stored.
+  await page.getByRole('button', { name: /^Edit/ }).first().click();
+  await page.waitForTimeout(300);
+  await page.getByLabel('Target weight').fill('500');
+  await page.getByRole('button', { name: 'Save goal' }).click();
+  await page.waitForTimeout(600);
+  ok(
+    'raising the target beyond anything logged drops the achievement',
+    (await goalsText()).includes('Not yet'),
+    (await goalsText()).slice(0, 160),
+  );
+
+  // …and lowering it again restores it, from the same untouched history.
+  await page.getByRole('button', { name: /^Edit/ }).first().click();
+  await page.waitForTimeout(300);
+  await page.getByLabel('Target weight').fill('300');
+  await page.getByRole('button', { name: 'Save goal' }).click();
+  await page.waitForTimeout(600);
+  ok(
+    'lowering it again restores the achievement',
+    (await goalsText()).includes('Achieved') &&
+      !(await goalsText()).includes('Not yet'),
+  );
+
+  // Accessibility and width, with the goals list on screen.
+  await page.setViewportSize({ width: 320, height: 720 });
+  await page.waitForTimeout(300);
+  const goalsAxe = await new AxeBuilder({ page })
+    .include('[role="dialog"]')
+    .analyze();
+  const goalsSerious = goalsAxe.violations.filter((v) =>
+    ['serious', 'critical'].includes(v.impact),
+  );
+  ok(
+    'axe: no serious violations on the goals tab at 320px',
+    goalsSerious.length === 0,
+    goalsSerious.map((v) => `${v.id}(${v.nodes.length})`).join(', '),
+  );
+  const goalsOverflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - window.innerWidth,
+  );
+  ok(
+    'no horizontal overflow on the goals tab at 320px',
+    goalsOverflow <= 0,
+    `overflow=${goalsOverflow}px`,
+  );
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.waitForTimeout(300);
+  const goalsWideAxe = await new AxeBuilder({ page })
+    .include('[role="dialog"]')
+    .analyze();
+  ok(
+    'axe: no serious violations on the goals tab at 1280px',
+    goalsWideAxe.violations.filter((v) =>
+      ['serious', 'critical'].includes(v.impact),
+    ).length === 0,
+    goalsWideAxe.violations.map((v) => v.id).join(', '),
+  );
+
+  // Archiving retires the goal without deleting it, or the history behind it.
+  await page
+    .getByRole('button', { name: /^Archive/ })
+    .first()
+    .click();
+  await page.waitForTimeout(600);
+  ok(
+    'an archived goal leaves the active list',
+    (await goalsText()).includes('No active goals'),
+    (await goalsText()).slice(0, 140),
+  );
+  await page.getByLabel('Show archived goals').check();
+  await page.waitForTimeout(400);
+  ok(
+    'it is still there, marked archived, with its achievement intact',
+    (await goalsText()).includes('archived') &&
+      (await goalsText()).includes('Achieved'),
+    (await goalsText()).slice(0, 160),
+  );
+
+  // It survives a reload, which is what "in the backup" has to mean locally.
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(250);
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForTimeout(700);
+  await page.getByRole('button', { name: 'Progress' }).click();
+  await page.waitForSelector('[role="dialog"]');
+  await page.getByRole('tab', { name: 'Goals' }).click();
+  await page.getByLabel('Show archived goals').check();
+  await page.waitForTimeout(400);
+  ok(
+    'the goal persists across a reload',
+    (await goalsText()).includes('300 lb'),
+    (await goalsText()).slice(0, 140),
+  );
+
+  // The stored mode must survive an edit: it is what keeps a goal readable
+  // after the movement library changes underneath it.
+  const storedGoalModes = async () => {
+    const stored = await storedState();
+    return Object.values(stored?.goals ?? {}).map((g) => g.mode);
+  };
+  const modesBeforeEdit = await storedGoalModes();
+  ok(
+    'a goal stores the mode it was set under',
+    modesBeforeEdit.length > 0 && modesBeforeEdit.every(Boolean),
+    JSON.stringify(modesBeforeEdit),
+  );
+  await page.getByRole('button', { name: /^Edit/ }).first().click();
+  await page.waitForTimeout(300);
+  await page.getByLabel('Target reps').fill('4');
+  await page.getByRole('button', { name: 'Save goal' }).click();
+  await page.waitForTimeout(600);
+  ok(
+    'editing a target does not restamp the stored mode',
+    JSON.stringify(await storedGoalModes()) === JSON.stringify(modesBeforeEdit),
+    JSON.stringify(await storedGoalModes()),
+  );
+  await page.getByRole('button', { name: /^Edit/ }).first().click();
+  await page.waitForTimeout(300);
+  await page.getByLabel('Target reps').fill('5');
+  await page.getByRole('button', { name: 'Save goal' }).click();
+  await page.waitForTimeout(600);
+
+  // A unilateral movement has no combined measurement, so a bilateral target
+  // for it could never be met. The form must not offer one.
+  await page.getByRole('button', { name: 'New goal' }).click();
+  await page.waitForTimeout(300);
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('button', { name: /Bulgarian Split Squat/ })
+    .first()
+    .click();
+  await page.waitForTimeout(400);
+  const sideSelect = page.getByLabel('Applies to');
+  ok(
+    'a unilateral goal defaults to one side, not to both',
+    (await sideSelect.inputValue()) === 'left',
+    await sideSelect.inputValue(),
+  );
+  ok(
+    'and an unreachable combined target is not offered at all',
+    (await sideSelect.locator('option[value="bilateral"]').count()) === 0,
+    String(await sideSelect.locator('option').count()),
+  );
+  ok(
+    'the form explains why the goal is one-sided',
+    (await page.textContent('[role="dialog"]')).includes(
+      'trained one side at a time',
+    ),
+  );
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.waitForTimeout(300);
+
+  // Deleting removes the goal and leaves the logged sets alone.
+  await page
+    .getByRole('button', { name: /^Restore/ })
+    .first()
+    .click();
+  await page.waitForTimeout(400);
+  await page.getByLabel('Show archived goals').uncheck();
+  await page.waitForTimeout(300);
+  await page
+    .getByRole('button', { name: /^Delete/ })
+    .first()
+    .click();
+  await page.waitForTimeout(600);
+  ok(
+    'deleting a goal removes it',
+    (await goalsText()).includes('No active goals'),
+    (await goalsText()).slice(0, 140),
+  );
+
+  // Setting the same goal again proves the history behind it is still there:
+  // it can only read as achieved by re-reading the very sets that met it.
+  await page.getByRole('button', { name: 'New goal' }).click();
+  await page.waitForTimeout(300);
+  await page
+    .locator('[role="dialog"]')
+    .getByRole('button', { name: new RegExp(prExercise) })
+    .first()
+    .click();
+  await page.waitForTimeout(300);
+  await page.getByLabel('Target weight').fill('300');
+  await page.getByLabel('Target reps').fill('5');
+  await page.getByRole('button', { name: 'Add goal' }).click();
+  await page.waitForTimeout(600);
+  ok(
+    'the sets that met the goal are untouched by deleting it',
+    (await goalsText()).includes('Achieved'),
+    (await goalsText()).slice(0, 140),
+  );
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(250);
+
+  // A malformed goal fails the whole import rather than being dropped: the
+  // athlete would otherwise believe a goal had been restored when it had not.
+  await page.getByRole('button', { name: 'Backup' }).first().click();
+  await page.waitForSelector('[role="dialog"]');
+  const badGoalPath = file('bad-goal.json');
+  fs.writeFileSync(
+    badGoalPath,
+    JSON.stringify({
+      schemaVersion: 5,
+      unit: 'lb',
+      sessions: {},
+      routine: [],
+      movements: {},
+      goals: {
+        g1: {
+          goalId: 'g1',
+          movementId: 'barbell-bench-press',
+          targetWeight: 100,
+          targetReps: 0,
+          unit: 'kg',
+          createdAt: '2026-01-01',
+        },
+      },
+    }),
+  );
+  await page.setInputFiles('input[type="file"]', badGoalPath);
+  await page.waitForTimeout(500);
+  const badGoalMsg = await page
+    .locator('[role="dialog"] [role="status"]')
+    .innerText();
+  ok(
+    'a backup carrying an impossible goal is rejected',
+    badGoalMsg.toLowerCase().includes('not valid'),
+    badGoalMsg,
+  );
+  ok(
+    'and the rejection leaves local data untouched',
+    badGoalMsg.includes('has not been changed'),
+    badGoalMsg,
+  );
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(250);
 
   // ---------- Timer isolation between sessions ----------
   const liveTimer = () =>

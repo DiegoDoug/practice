@@ -371,9 +371,18 @@ export type Goal = {
   targetReps: number;
   /** The unit the target was set in. Comparison converts; it never assumes. */
   unit: WeightUnit;
+  /**
+   * How the target's load is recorded, captured when the goal is set so a later
+   * library edit cannot turn a bodyweight goal into an unreachable loaded one.
+   */
+  mode?: 'external' | 'bodyweight';
   /** Which side a unilateral target applies to; absent means bilateral. */
   side?: 'left' | 'right';
-  /** Local date the goal was created. Only later sets can satisfy it. */
+  /**
+   * Local date the goal was set. It does not gate achievement — history
+   * already on record satisfies a goal — but it is what lets the UI say
+   * whether the lift was already done when the goal was created.
+   */
   createdAt: string;
   archived?: boolean;
 };
