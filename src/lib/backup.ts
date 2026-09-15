@@ -55,14 +55,99 @@ const muscleIdSchema = z.enum([
   'abs',
 ]);
 
+/**
+ * One superset or circuit.
+ *
+ * Every field is checked for what makes it *usable*, not merely present.
+ * `.int()` is doing real work on the numbers: it rejects `0`, negatives,
+ * fractions, `Infinity` and `NaN` in a single rule, and a group whose rounds
+ * are any of those can never render a round count.
+ *
+ * What CANNOT be decided here is cross-field: whether the slots exist, and
+ * whether two groups claim the same one. Both need the owning day, so they live
+ * in `refineGroupOwnership` below and are applied wherever groups are owned.
+ */
 const exerciseGroupSchema = z.object({
-  groupId: z.string(),
+  groupId: z.string().min(1, 'A group id cannot be empty'),
   kind: z.enum(['superset', 'circuit']),
-  slotIds: z.array(z.string()),
+  slotIds: z
+    .array(z.string().min(1, 'A group slot id cannot be empty'))
+    .min(2, 'A group needs at least two exercises'),
   rounds: z.number().int().positive(),
-  restBetweenExercisesSec: z.number().nonnegative().optional(),
-  restBetweenRoundsSec: z.number().nonnegative().optional(),
+  restBetweenExercisesSec: z.number().int().nonnegative().optional(),
+  restBetweenRoundsSec: z.number().int().nonnegative().optional(),
 });
+
+type ParsedGroup = z.infer<typeof exerciseGroupSchema>;
+
+/**
+ * The cross-field group rules, in ONE place.
+ *
+ * A group is only meaningful relative to the day or snapshot that owns it, so
+ * these four checks are applied by every owner — routine days and frozen
+ * session snapshots alike — rather than being restated at each site where they
+ * would drift apart.
+ */
+function refineGroupOwnership(
+  groups: ParsedGroup[] | undefined,
+  slotIdsInOwner: readonly string[],
+  ctx: z.RefinementCtx,
+  at: string,
+): void {
+  if (!groups || groups.length === 0) return;
+  const known = new Set(slotIdsInOwner);
+  const seenIds = new Set<string>();
+  const claimed = new Map<string, string>();
+
+  groups.forEach((group, index) => {
+    const path = [at, index] as const;
+    if (seenIds.has(group.groupId)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [...path, 'groupId'],
+        message: `Duplicate group id "${group.groupId}"`,
+      });
+    }
+    seenIds.add(group.groupId);
+
+    const distinct = new Set(group.slotIds);
+    if (distinct.size !== group.slotIds.length) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [...path, 'slotIds'],
+        message: `Group "${group.groupId}" lists the same exercise twice`,
+      });
+    }
+    if (distinct.size < 2) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [...path, 'slotIds'],
+        message: `Group "${group.groupId}" needs at least two distinct exercises`,
+      });
+    }
+
+    for (const slotId of distinct) {
+      if (!known.has(slotId)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [...path, 'slotIds'],
+          message: `Group "${group.groupId}" references missing exercise "${slotId}"`,
+        });
+        continue;
+      }
+      const owner = claimed.get(slotId);
+      if (owner !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [...path, 'slotIds'],
+          message: `Exercise "${slotId}" is in both "${owner}" and "${group.groupId}"`,
+        });
+        continue;
+      }
+      claimed.set(slotId, group.groupId);
+    }
+  });
+}
 
 // --- v2: the original localStorage workout log -----------------------------
 
@@ -125,15 +210,24 @@ const routineExerciseSchema = z.object({
   unilateral: z.boolean().optional(),
 });
 
-const routineDaySchema = z.object({
-  dayId: z.string(),
-  label: z.string(),
-  name: z.string(),
-  warmup: z.array(z.string()),
-  exercises: z.array(routineExerciseSchema),
-  archived: z.boolean().optional(),
-  groups: z.array(exerciseGroupSchema).optional(),
-});
+const routineDaySchema = z
+  .object({
+    dayId: z.string(),
+    label: z.string(),
+    name: z.string(),
+    warmup: z.array(z.string()),
+    exercises: z.array(routineExerciseSchema),
+    archived: z.boolean().optional(),
+    groups: z.array(exerciseGroupSchema).optional(),
+  })
+  .superRefine((day, ctx) => {
+    refineGroupOwnership(
+      day.groups,
+      day.exercises.map((slot) => slot.slotId),
+      ctx,
+      'groups',
+    );
+  });
 
 const snapshotSchema = z.object({
   label: z.string(),
@@ -194,11 +288,20 @@ const snapshotExerciseSchema = z.object({
   secondaryMuscles: z.array(muscleIdSchema).catch([]),
 });
 
+/**
+ * `groups` is `.default([])`, not `.catch([])`.
+ *
+ * A v5 document written before groups existed simply has no `groups` key, and
+ * that is a missing field with an obvious answer. A `groups` key holding a
+ * malformed group is something else entirely — swallowing it would drop a
+ * superset out of a frozen workout without a word, which is exactly the silent
+ * data loss strict validation is for.
+ */
 const sessionSnapshotSchema = z.object({
   label: z.string(),
   name: z.string(),
   exercises: z.array(snapshotExerciseSchema),
-  groups: z.array(exerciseGroupSchema).catch([]),
+  groups: z.array(exerciseGroupSchema).default([]),
 });
 
 const exerciseLogSchema = z.object({
@@ -208,23 +311,68 @@ const exerciseLogSchema = z.object({
   sets: z.array(setEntrySchema),
 });
 
-const sessionSchema = z.object({
-  sessionId: z.string(),
-  routineDayId: z.string().nullable(),
-  scheduledDate: z.string().regex(weekKeyPattern).optional(),
-  performedDate: z.string().regex(weekKeyPattern).optional(),
-  legacyWeekKey: z.string().regex(weekKeyPattern).optional(),
-  status: z.enum(['scheduled', 'in_progress', 'completed', 'skipped']),
-  startedAt: z.number().optional(),
-  finishedAt: z.number().optional(),
-  pausedMs: z.number().optional(),
-  snapshot: sessionSnapshotSchema.optional(),
-  exercises: z.record(z.string(), exerciseLogSchema),
-  substitutions: z.record(z.string(), z.string()).optional(),
-  note: z.string().optional(),
-  slotNotes: z.record(z.string(), z.string()).optional(),
-  groupProgress: z.record(z.string(), z.number()).optional(),
-});
+const sessionSchema = z
+  .object({
+    sessionId: z.string(),
+    routineDayId: z.string().nullable(),
+    scheduledDate: z.string().regex(weekKeyPattern).optional(),
+    performedDate: z.string().regex(weekKeyPattern).optional(),
+    legacyWeekKey: z.string().regex(weekKeyPattern).optional(),
+    status: z.enum(['scheduled', 'in_progress', 'completed', 'skipped']),
+    startedAt: z.number().optional(),
+    finishedAt: z.number().optional(),
+    pausedMs: z.number().optional(),
+    snapshot: sessionSnapshotSchema.optional(),
+    exercises: z.record(z.string(), exerciseLogSchema),
+    substitutions: z.record(z.string(), z.string()).optional(),
+    note: z.string().optional(),
+    slotNotes: z.record(z.string(), z.string()).optional(),
+    groupProgress: z
+      .record(z.string(), z.number().int().nonnegative())
+      .optional(),
+  })
+  .superRefine((session, ctx) => {
+    const snapshot = session.snapshot;
+    refineGroupOwnership(
+      snapshot?.groups,
+      snapshot?.exercises.map((slot) => slot.slotId) ?? [],
+      ctx,
+      'snapshot.groups',
+    );
+
+    // This build derives round progress from the logs and never writes this
+    // field (see docs/data-contract.md). It is still validated rather than
+    // ignored: a document carrying progress for a group that does not exist, or
+    // for more rounds than the session could possibly hold, is describing a
+    // workout that never happened, and restoring it would show the athlete a
+    // round count their own sets contradict.
+    for (const [groupId, rounds] of Object.entries(
+      session.groupProgress ?? {},
+    )) {
+      const group = snapshot?.groups.find((entry) => entry.groupId === groupId);
+      if (!group) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['groupProgress', groupId],
+          message: `Progress recorded for unknown group "${groupId}"`,
+        });
+        continue;
+      }
+      const logged = group.slotIds.reduce(
+        (most, slotId) =>
+          Math.max(most, session.exercises[slotId]?.sets.length ?? 0),
+        0,
+      );
+      const possible = Math.max(group.rounds, logged);
+      if (rounds > possible) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['groupProgress', groupId],
+          message: `Group "${groupId}" claims ${rounds} rounds but only ${possible} are possible`,
+        });
+      }
+    }
+  });
 
 /** A local calendar day, `YYYY-MM-DD`, as `week.ts` writes them. */
 const dateKeySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);

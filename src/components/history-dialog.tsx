@@ -106,6 +106,27 @@ export function HistoryDialog({ open, onClose, state }: HistoryDialogProps) {
                     {entry.sets} logged {entry.sets === 1 ? 'set' : 'sets'} ·{' '}
                     {formatVolume(entry.volume)} {state.unit}/reps volume
                   </p>
+                  {entry.groups.length > 0 ? (
+                    <ul
+                      data-history-groups={entry.sessionId}
+                      className="mt-1 space-y-0.5"
+                    >
+                      {entry.groups.map((group) => (
+                        <li
+                          key={group.groupId}
+                          className="text-muted text-[12px]"
+                        >
+                          <span className="text-ocean-deep font-semibold">
+                            {group.kindLabel}
+                          </span>{' '}
+                          <span className="tnum">
+                            {group.completedRounds}/{group.totalRounds} rounds
+                          </span>{' '}
+                          · {group.exercises.join(' \u2192 ')}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
                 </div>
                 <p className="tnum text-muted shrink-0 text-[12px]">
                   {entry.date

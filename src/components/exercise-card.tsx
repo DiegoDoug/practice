@@ -33,6 +33,8 @@ type ExerciseCardProps = {
   slotId: string;
   name: string;
   group: string;
+  /** `A1`, `A2`… when this exercise is a member of a superset or circuit. */
+  orderLabel?: string;
   unilateral: boolean;
   loadMode: LoadMode;
   sets: SetEntry[];
@@ -71,6 +73,7 @@ export function ExerciseCard({
   slotId,
   name,
   group,
+  orderLabel,
   unilateral,
   loadMode,
   movementId,
@@ -157,6 +160,12 @@ export function ExerciseCard({
       className="border-hairline border-b py-4 last:border-b-0 last:pb-1"
     >
       <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+        {orderLabel ? (
+          <span className="bg-ocean-blue shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-bold text-white">
+            <span aria-hidden="true">{orderLabel}</span>
+            <span className="sr-only">Position {orderLabel} in this group</span>
+          </span>
+        ) : null}
         <label className="min-w-[180px] flex-1">
           <span className="sr-only">Exercise {index + 1} display name</span>
           <input

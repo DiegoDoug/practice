@@ -5,6 +5,7 @@ import { ExerciseCard } from './exercise-card';
 import type {
   RoutineDay,
   SetEntry,
+  SnapshotExercise,
   WorkoutSession,
   WorkoutState,
 } from '@/lib/types';
@@ -14,6 +15,8 @@ import {
   getSets,
 } from '@/lib/workout';
 import { resolveSessionRoutine } from '@/lib/routine';
+import { deriveGroupProgress, layoutDay } from '@/lib/groups';
+import { GroupBlock } from './group-block';
 
 /** Stand-in used only to resolve the routine before a session exists. */
 const blankSession: WorkoutSession = {
@@ -74,6 +77,65 @@ export function WorkoutDay({
   const total = resolved.exercises.length;
   const logged = session ? countLoggedExercises(state, sessionId) : 0;
   const percent = total === 0 ? 0 : Math.min(100, (logged / total) * 100);
+
+  // Groups sit where their first member sits; standalone exercises keep their
+  // places around them. Members render once, inside their group.
+  const blocks = layoutDay(resolved);
+  const letters = new Map<string, string>();
+  for (const block of blocks) {
+    if (block.kind !== 'group') continue;
+    letters.set(
+      block.group.groupId,
+      String.fromCharCode(65 + (letters.size % 26)),
+    );
+  }
+
+  /** Render position, used for the DOM hook and the accessible index only. */
+  const indexOf = new Map(
+    resolved.exercises.map((slot, index) => [slot.slotId, index] as const),
+  );
+  const nameOf = (slotId: string): string =>
+    resolved.exercises.find((slot) => slot.slotId === slotId)?.name ?? '';
+
+  const renderCard = (slot: SnapshotExercise, orderLabel?: string) => {
+    const prior = findPriorPerformance(
+      state,
+      // With no session yet, nothing has been logged for this exercise today,
+      // so everything already logged counts as prior.
+      session ? { sessionId } : {},
+      slot.movementId,
+      day?.dayId,
+      slot.slotId,
+    );
+    const plannedName = state.movements[slot.movementId]?.name ?? slot.name;
+    return (
+      <ExerciseCard
+        key={slot.slotId}
+        dayId={day?.dayId ?? ''}
+        index={indexOf.get(slot.slotId) ?? 0}
+        slotId={slot.slotId}
+        name={slot.name}
+        group={slot.group}
+        orderLabel={orderLabel}
+        unilateral={Boolean(slot.unilateral)}
+        loadMode={slot.loadMode}
+        movementId={slot.movementId}
+        sets={getSets(state, sessionId, slot.slotId, Boolean(slot.unilateral))}
+        prior={prior}
+        priorNote={
+          prior && day && prior.dayId !== day.dayId
+            ? `as ${plannedName}`
+            : undefined
+        }
+        onSetsChange={(update) => onSetsChange(slot.slotId, update)}
+        onRename={(name) => onRename(slot.slotId, name)}
+        onSetComplete={onSetComplete}
+        onSubstitute={() => onSubstitute(slot.slotId)}
+        substituted={Boolean(substitutions[slot.slotId])}
+        onUndoSubstitute={() => onUndoSubstitute(slot.slotId)}
+      />
+    );
+  };
 
   return (
     <section
@@ -152,50 +214,26 @@ export function WorkoutDay({
         </p>
       ) : (
         <ul className="mt-1">
-          {resolved.exercises.map((slot, index) => {
-            const prior = findPriorPerformance(
-              state,
-              // With no session yet, nothing has been logged for this exercise
-              // today, so everything already logged counts as prior.
-              session ? { sessionId } : {},
-              slot.movementId,
-              day?.dayId,
-              slot.slotId,
-            );
-            const plannedName =
-              state.movements[slot.movementId]?.name ?? slot.name;
-            return (
-              <ExerciseCard
-                key={slot.slotId}
-                dayId={day?.dayId ?? ''}
-                index={index}
-                slotId={slot.slotId}
-                name={slot.name}
-                group={slot.group}
-                unilateral={Boolean(slot.unilateral)}
-                loadMode={slot.loadMode}
-                movementId={slot.movementId}
-                sets={getSets(
-                  state,
-                  sessionId,
-                  slot.slotId,
-                  Boolean(slot.unilateral),
+          {blocks.map((block) =>
+            block.kind === 'exercise' ? (
+              renderCard(block.slot)
+            ) : (
+              <GroupBlock
+                key={block.group.groupId}
+                group={block.group}
+                progress={deriveGroupProgress(block.group, session?.exercises)}
+                letter={letters.get(block.group.groupId) ?? 'A'}
+                nameOf={nameOf}
+              >
+                {block.slots.map((slot, position) =>
+                  renderCard(
+                    slot,
+                    `${letters.get(block.group.groupId) ?? 'A'}${position + 1}`,
+                  ),
                 )}
-                prior={prior}
-                priorNote={
-                  prior && day && prior.dayId !== day.dayId
-                    ? `as ${plannedName}`
-                    : undefined
-                }
-                onSetsChange={(update) => onSetsChange(slot.slotId, update)}
-                onRename={(name) => onRename(slot.slotId, name)}
-                onSetComplete={onSetComplete}
-                onSubstitute={() => onSubstitute(slot.slotId)}
-                substituted={Boolean(substitutions[slot.slotId])}
-                onUndoSubstitute={() => onUndoSubstitute(slot.slotId)}
-              />
-            );
-          })}
+              </GroupBlock>
+            ),
+          )}
         </ul>
       )}
 
